@@ -1,9 +1,11 @@
 # GPU node configs (contain hostnames, keep local only)
 .cursor/configs/gpu_nodes.list
 
-# POC output
+# POC / SDG output
 poc_output/
+sdg_data/
 *.npy
+*.mp4
 
 # Python
 __pycache__/

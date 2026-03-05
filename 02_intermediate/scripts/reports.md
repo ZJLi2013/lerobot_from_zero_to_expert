@@ -162,7 +162,75 @@ docker run --rm --gpus all \
 
 ---
 
-## 五、结论与下一步
+## 五、LeRobot 格式打包
+
+### 5.1 转换脚本
+
+`npy_to_lerobot.py` 将 SDG 输出的 npy 文件转为 LeRobot v3 标准格式。
+
+```bash
+docker run --rm \
+  -v ~/github/lerobot_from_zero_to_expert:/workspace/lfzte \
+  -v ~/sdg_output:/output \
+  genesis_poc:v3 \
+  python -u /workspace/lfzte/02_intermediate/scripts/npy_to_lerobot.py \
+    --input /output/npy --output /output/lerobot_dataset --fps 30
+```
+
+### 5.2 输出结构
+
+```
+lerobot_dataset/
+  data/chunk-000/file-000.parquet          (40.5 KB, 720 rows)
+  videos/observation.images.up/chunk-000/
+    episode_000000.mp4                     (795.0 KB, 240 frames)
+    episode_000001.mp4                     (852.5 KB)
+    episode_000002.mp4                     (701.2 KB)
+  videos/observation.images.side/chunk-000/
+    episode_000000.mp4                     (1189.0 KB, 240 frames)
+    episode_000001.mp4                     (1282.8 KB)
+    episode_000002.mp4                     (1100.5 KB)
+  meta/
+    info.json                              (2.2 KB)
+    episodes/chunk-000/file-000.parquet    (2.9 KB)
+    tasks/chunk-000/file-000.parquet       (1.9 KB)
+```
+
+### 5.3 info.json 关键字段
+
+| 字段 | 值 |
+|------|-----|
+| codebase_version | v3.0 |
+| robot_type | so101 |
+| total_episodes | 3 |
+| total_frames | 720 |
+| fps | 30 |
+| observation.state | float32, shape=[6], names=[shoulder_pan...gripper] |
+| action | float32, shape=[6] |
+| observation.images.up | video, [3, 480, 640], mp4v |
+| observation.images.side | video, [3, 480, 640], mp4v |
+
+### 5.4 数据已回传本地
+
+```
+02_intermediate/sdg_data/
+  lerobot_dataset/   ← LeRobot v3 格式（Parquet + MP4 + meta）
+  npy/               ← 原始 npy 文件（states, actions, images）
+```
+
+---
+
+## 六、Docker 镜像版本
+
+| 镜像 | 新增内容 | 用途 |
+|------|---------|------|
+| genesis_poc:latest | genesis-world + OpenGL libs + xvfb | POC 验证 |
+| genesis_poc:v2 | + libxrender1 | SDG 运行 |
+| genesis_poc:v3 | + pyarrow + opencv-headless + pandas | LeRobot 格式转换 |
+
+---
+
+## 七、结论与下一步
 
 ### 已验证
 
@@ -171,11 +239,13 @@ docker run --rm --gpus all \
 - 双相机 (480×640) 渲染正常
 - 输出数据结构与 svla_so101_pickplace 完全兼容
 - 单 episode（240 帧 × 双相机渲染）耗时约 100s
+- **LeRobot v3 格式打包完成**：Parquet + MP4 + meta/info.json
+- 合成数据已回传本地
 
 ### 待完成
 
-1. **LeRobot 格式打包**：将 npy 输出转为 Parquet + MP4 + meta/info.json
-2. **并行环境加速**：利用 Genesis `n_envs` 参数并行化，预计 10-50x 加速
-3. **轨迹质量优化**：调优 PD 增益（当前 Home 误差 8.27°），改进 IK 求解策略
-4. **域随机化扩展**：增加光照、纹理、物体类型等随机化维度
-5. **大规模采集**：目标 50-500 episodes，对齐 svla_so101_pickplace 规模
+1. **并行环境加速**：利用 Genesis `n_envs` 参数并行化，预计 10-50x 加速
+2. **轨迹质量优化**：调优 PD 增益（当前 Home 误差 8.27°），改进 IK 求解策略
+3. **域随机化扩展**：增加光照、纹理、物体类型等随机化维度
+4. **大规模采集**：目标 50-500 episodes，对齐 svla_so101_pickplace 规模
+5. **HuggingFace Hub 推送**：使用 LeRobot API 直接推送到 Hub
