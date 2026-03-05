@@ -19,6 +19,7 @@ svla_so101_pickplace 数据结构采集 (state, action, image_up, image_side)。
   python sdg_so101_genesis.py --episodes 10 --fps 30   # 自定义
   python sdg_so101_genesis.py --no-download             # 跳过 URDF 下载
 """
+
 import argparse
 import os
 import subprocess
@@ -31,6 +32,7 @@ import numpy as np
 
 # ── Headless display ─────────────────────────────────────────────────────────
 
+
 def ensure_display():
     if os.environ.get("DISPLAY"):
         print(f"[display] DISPLAY={os.environ['DISPLAY']} (already set)")
@@ -42,7 +44,8 @@ def ensure_display():
     print("[display] Starting Xvfb :99 ...")
     proc = subprocess.Popen(
         ["Xvfb", ":99", "-screen", "0", "1280x1024x24", "-ac", "+extension", "GLX"],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
     os.environ["DISPLAY"] = ":99"
     time.sleep(2)
@@ -51,6 +54,7 @@ def ensure_display():
     else:
         print("[display] WARNING: Xvfb exited immediately")
 
+
 ensure_display()
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
@@ -58,7 +62,9 @@ ensure_display()
 parser = argparse.ArgumentParser(description="Genesis × SO-101 URDF SDG 验证")
 parser.add_argument("--episodes", type=int, default=3, help="采集 episode 数")
 parser.add_argument("--fps", type=int, default=30, help="采集频率")
-parser.add_argument("--episode-length", type=float, default=8.0, help="单 episode 时长(秒)")
+parser.add_argument(
+    "--episode-length", type=float, default=8.0, help="单 episode 时长(秒)"
+)
 parser.add_argument("--img-w", type=int, default=640, help="图像宽度")
 parser.add_argument("--img-h", type=int, default=480, help="图像高度")
 parser.add_argument("--save", default="/tmp/sdg_so101_output", help="输出目录")
@@ -71,8 +77,10 @@ PASS = "✓ PASS"
 FAIL = "✗ FAIL"
 results = {}
 
+
 def stage(name):
     print(f"\n{'─'*60}\n  [{name}]\n{'─'*60}")
+
 
 def ok(label, val=""):
     msg = f"  {PASS}  {label}"
@@ -80,8 +88,10 @@ def ok(label, val=""):
         msg += f"  →  {val}"
     print(msg)
 
+
 def err(label, e):
     print(f"  {FAIL}  {label}\n         {type(e).__name__}: {e}")
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # [1] SO-101 URDF 下载
@@ -121,7 +131,8 @@ JOINT_SEMANTIC = {
 
 HOME_DEG = np.array([0.0, -30.0, 90.0, -60.0, 0.0, 0.0], dtype=np.float32)
 KP = np.array([100.0, 100.0, 80.0, 80.0, 60.0, 40.0])
-KV = np.array([10.0,  10.0,  8.0,  8.0,  6.0,  4.0])
+KV = np.array([10.0, 10.0, 8.0, 8.0, 6.0, 4.0])
+
 
 def download_urdf(target_dir: Path):
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -144,6 +155,7 @@ def download_urdf(target_dir: Path):
             urllib.request.urlretrieve(url, str(stl_path))
 
     return urdf_path
+
 
 try:
     if args.urdf_dir:
@@ -299,12 +311,15 @@ try:
     ok("Home pose set", f"deg={home_deg.tolist()}")
 
     cur_t = so101.get_dofs_position(ALL_DOF_IDX)
-    cur_np = cur_t.cpu().numpy() if hasattr(cur_t, 'cpu') else np.array(cur_t)
+    cur_np = cur_t.cpu().numpy() if hasattr(cur_t, "cpu") else np.array(cur_t)
     if cur_np.ndim > 1:
         cur_np = cur_np[0]
     cur_deg = np.rad2deg(cur_np)
     home_err = np.abs(cur_deg - home_deg).mean()
-    ok("Home tracking", f"mean_err={home_err:.2f}° | actual={np.round(cur_deg, 1).tolist()}")
+    ok(
+        "Home tracking",
+        f"mean_err={home_err:.2f}° | actual={np.round(cur_deg, 1).tolist()}",
+    )
     results["4"] = True
 except Exception as e:
     err("PD / home", e)
@@ -320,7 +335,11 @@ try:
         print(f"  - SKIP  EE link 未找到")
     else:
         cube_pos_t = cube.get_pos()
-        cube_pos = cube_pos_t.cpu().numpy() if hasattr(cube_pos_t, 'cpu') else np.array(cube_pos_t)
+        cube_pos = (
+            cube_pos_t.cpu().numpy()
+            if hasattr(cube_pos_t, "cpu")
+            else np.array(cube_pos_t)
+        )
         if cube_pos.ndim > 1:
             cube_pos = cube_pos[0]
 
@@ -334,10 +353,15 @@ try:
             quat=target_quat,
         )
         dt_ik = (time.time() - t0) * 1000
-        qpos_np = qpos_ik.cpu().numpy() if hasattr(qpos_ik, 'cpu') else np.array(qpos_ik)
+        qpos_np = (
+            qpos_ik.cpu().numpy() if hasattr(qpos_ik, "cpu") else np.array(qpos_ik)
+        )
         if qpos_np.ndim > 1:
             qpos_np = qpos_np[0]
-        ok("IK solved", f"{dt_ik:.0f}ms → deg={np.round(np.rad2deg(qpos_np), 1).tolist()}")
+        ok(
+            "IK solved",
+            f"{dt_ik:.0f}ms → deg={np.round(np.rad2deg(qpos_np), 1).tolist()}",
+        )
         ik_available = True
     results["5"] = True
 except Exception as e:
@@ -349,18 +373,23 @@ except Exception as e:
 # ─────────────────────────────────────────────────────────────────────────────
 stage(f"6/7  30Hz 采集循环 × {args.episodes} episodes")
 
+
 def to_numpy(t):
-    arr = t.cpu().numpy() if hasattr(t, 'cpu') else np.array(t)
+    arr = t.cpu().numpy() if hasattr(t, "cpu") else np.array(t)
     return arr[0] if arr.ndim > 1 else arr
+
 
 def render_camera(cam):
     rgb, _, _, _ = cam.render(rgb=True, depth=False, segmentation=False, normal=False)
-    arr = rgb.cpu().numpy() if hasattr(rgb, 'cpu') else np.array(rgb)
+    arr = rgb.cpu().numpy() if hasattr(rgb, "cpu") else np.array(rgb)
     if arr.ndim == 4:
         arr = arr[0]
     return arr.astype(np.uint8)
 
-def generate_scripted_trajectory(n_steps, n_dofs, ik_available, so101, ee_link, cube_pos):
+
+def generate_scripted_trajectory(
+    n_steps, n_dofs, ik_available, so101, ee_link, cube_pos
+):
     """
     Generate a scripted pick-place trajectory.
     Returns list of (target_deg,) for each timestep.
@@ -427,6 +456,7 @@ def generate_scripted_trajectory(n_steps, n_dofs, ik_available, so101, ee_link, 
 
     return traj
 
+
 try:
     steps_per_episode = int(args.episode_length * args.fps)
     all_episodes = []
@@ -446,7 +476,11 @@ try:
         cy = np.random.uniform(-0.08, 0.08)
         cz = 0.015
         cube_pos_rand = np.array([cx, cy, cz])
-        cube.set_pos(torch.tensor(cube_pos_rand, dtype=torch.float32, device=gs.device).unsqueeze(0))
+        cube.set_pos(
+            torch.tensor(
+                cube_pos_rand, dtype=torch.float32, device=gs.device
+            ).unsqueeze(0)
+        )
         for _ in range(10):
             scene.step()
 
@@ -455,8 +489,12 @@ try:
 
         # Generate trajectory
         trajectory = generate_scripted_trajectory(
-            steps_per_episode, n_dofs, ik_available,
-            so101, ee_link, cube_pos_actual,
+            steps_per_episode,
+            n_dofs,
+            ik_available,
+            so101,
+            ee_link,
+            cube_pos_actual,
         )
 
         ep_data = {
@@ -489,12 +527,17 @@ try:
         all_episodes.append(ep_data)
         ep_elapsed = time.time() - ep_t0
         n_frames = len(trajectory)
-        print(f"  episode {ep_idx}: {n_frames} frames, {ep_elapsed:.1f}s "
-              f"({n_frames/ep_elapsed:.0f} fps sim)")
+        print(
+            f"  episode {ep_idx}: {n_frames} frames, {ep_elapsed:.1f}s "
+            f"({n_frames/ep_elapsed:.0f} fps sim)"
+        )
 
     collect_elapsed = time.time() - t_collect_start
     total_frames = sum(len(ep["timestamp"]) for ep in all_episodes)
-    ok(f"采集完成", f"{args.episodes} episodes, {total_frames} frames, {collect_elapsed:.1f}s")
+    ok(
+        f"采集完成",
+        f"{args.episodes} episodes, {total_frames} frames, {collect_elapsed:.1f}s",
+    )
     results["6"] = True
 except Exception as e:
     err("collection loop", e)
@@ -509,13 +552,21 @@ try:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # Concatenate all episodes
-    all_states = np.concatenate([np.stack(ep["observation.state"]) for ep in all_episodes])
+    all_states = np.concatenate(
+        [np.stack(ep["observation.state"]) for ep in all_episodes]
+    )
     all_actions = np.concatenate([np.stack(ep["action"]) for ep in all_episodes])
-    all_imgs_up = np.concatenate([np.stack(ep["observation.images.up"]) for ep in all_episodes])
-    all_imgs_side = np.concatenate([np.stack(ep["observation.images.side"]) for ep in all_episodes])
+    all_imgs_up = np.concatenate(
+        [np.stack(ep["observation.images.up"]) for ep in all_episodes]
+    )
+    all_imgs_side = np.concatenate(
+        [np.stack(ep["observation.images.side"]) for ep in all_episodes]
+    )
     all_timestamps = np.concatenate([np.array(ep["timestamp"]) for ep in all_episodes])
     all_frame_idx = np.concatenate([np.array(ep["frame_index"]) for ep in all_episodes])
-    all_episode_idx = np.concatenate([np.array(ep["episode_index"]) for ep in all_episodes])
+    all_episode_idx = np.concatenate(
+        [np.array(ep["episode_index"]) for ep in all_episodes]
+    )
 
     np.save(out_dir / "states.npy", all_states)
     np.save(out_dir / "actions.npy", all_actions)
@@ -528,15 +579,29 @@ try:
     # Per-episode metadata
     ep_meta = []
     for ep in all_episodes:
-        ep_meta.append({
-            "n_frames": len(ep["timestamp"]),
-            "duration": ep["timestamp"][-1] if ep["timestamp"] else 0,
-        })
+        ep_meta.append(
+            {
+                "n_frames": len(ep["timestamp"]),
+                "duration": ep["timestamp"][-1] if ep["timestamp"] else 0,
+            }
+        )
 
-    ok("states",  f"shape={all_states.shape}, range=[{all_states.min():.1f}, {all_states.max():.1f}]°")
-    ok("actions", f"shape={all_actions.shape}, range=[{all_actions.min():.1f}, {all_actions.max():.1f}]°")
-    ok("images_up",   f"shape={all_imgs_up.shape}, range=[{all_imgs_up.min()}, {all_imgs_up.max()}]")
-    ok("images_side", f"shape={all_imgs_side.shape}, range=[{all_imgs_side.min()}, {all_imgs_side.max()}]")
+    ok(
+        "states",
+        f"shape={all_states.shape}, range=[{all_states.min():.1f}, {all_states.max():.1f}]°",
+    )
+    ok(
+        "actions",
+        f"shape={all_actions.shape}, range=[{all_actions.min():.1f}, {all_actions.max():.1f}]°",
+    )
+    ok(
+        "images_up",
+        f"shape={all_imgs_up.shape}, range=[{all_imgs_up.min()}, {all_imgs_up.max()}]",
+    )
+    ok(
+        "images_side",
+        f"shape={all_imgs_side.shape}, range=[{all_imgs_side.min()}, {all_imgs_side.max()}]",
+    )
     ok(f"saved to", str(out_dir))
 
     # Print svla_so101_pickplace compatibility check
