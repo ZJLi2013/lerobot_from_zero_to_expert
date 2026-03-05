@@ -6,6 +6,7 @@ poc_output/
 sdg_data/
 *.npy
 *.mp4
+*.rrd
 
 # Python
 __pycache__/
