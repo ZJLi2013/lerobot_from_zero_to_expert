@@ -1,0 +1,11 @@
+# GPU node configs (contain hostnames, keep local only)
+.cursor/configs/gpu_nodes.list
+
+# POC output
+poc_output/
+*.npy
+
+# Python
+__pycache__/
+*.pyc
+.venv/

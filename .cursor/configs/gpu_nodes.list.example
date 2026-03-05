@@ -1,0 +1,6 @@
+# GPU 节点列表（复制为 gpu_nodes.list 并按实际填写）
+# 格式：user@host 或 SSH config 中的 Host alias
+# 本文件可提交；gpu_nodes.list 已 gitignore
+
+# NV 4090 (david@10.161.176.110)
+david@10.161.176.110
