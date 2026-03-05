@@ -1,6 +1,6 @@
 # Genesis × SO-101 合成数据生成 — 测试报告
 
-> 测试环境：NVIDIA RTX 4090 (david@10.161.176.110)
+> 测试环境：NVIDIA RTX 4090
 > Docker 镜像：genesis_poc:v2（基于 pytorch/pytorch:2.8.0-cuda12.6-cudnn9-devel + genesis-world + libxrender1 + xvfb）
 > 日期：2026-03-05
 
@@ -249,3 +249,65 @@ lerobot_dataset/
 3. **域随机化扩展**：增加光照、纹理、物体类型等随机化维度
 4. **大规模采集**：目标 50-500 episodes，对齐 svla_so101_pickplace 规模
 5. **HuggingFace Hub 推送**：使用 LeRobot API 直接推送到 Hub
+
+---
+
+## 八、AMD MI308 验证记录（新增）
+
+### 8.1 测试环境
+
+| 项目 | 信息 |
+|------|------|
+| 远端节点 | 已脱敏 |
+| GPU | AMD Instinct MI308X × 8 (`gfx942`) |
+| 基础镜像 | `rocm/pytorch:rocm6.4.3_ubuntu24.04_py3.12_pytorch_release_2.6.0` |
+| 运行模式 | **Headless**（脚本内 `Xvfb :99`） |
+| 测试脚本 | `02_intermediate/scripts/sdg_so101_genesis.py` |
+| 可视化脚本 | `02_intermediate/scripts/viz_sdg_rerun.py` |
+
+### 8.2 兼容性处理
+
+在该 ROCm 镜像内，直接安装 `genesis-world` 后运行会在 `scene.build()` 报二进制兼容错误：
+
+- `ValueError: numpy.dtype size changed, may indicate binary incompatibility`
+
+修复方式：安装依赖时固定 NumPy 到 1.26 系列（已验证 `1.26.4` 可用）。
+
+```bash
+python -m pip install --no-input numpy==1.26.4 genesis-world rerun-sdk
+```
+
+### 8.3 运行命令（MI308）
+
+```bash
+docker run --rm \
+  --device=/dev/kfd --device=/dev/dri --group-add video \
+  -v ~/github/lerobot_from_zero_to_expert:/workspace/lfzte \
+  -v ~/sdg_mi308_output:/output \
+  rocm/pytorch:rocm6.4.3_ubuntu24.04_py3.12_pytorch_release_2.6.0 \
+  bash -lc '
+    apt-get update && apt-get install -y xvfb libgl1 libgles2 libegl1 libglx-mesa0 libxrender1 &&
+    python -m pip install --no-input numpy==1.26.4 genesis-world rerun-sdk &&
+    python -u /workspace/lfzte/02_intermediate/scripts/sdg_so101_genesis.py --episodes 1 --episode-length 6 --save /output/npy_mi308 &&
+    python -u /workspace/lfzte/02_intermediate/scripts/viz_sdg_rerun.py --input /output/npy_mi308 --output /output/rrd_mi308 --episodes 0
+  '
+```
+
+### 8.4 结果
+
+`sdg_so101_genesis.py` 在 MI308 上 **7/7 全部通过**：
+
+- 1 episode / 180 frames
+- `state`: `(180, 6)`, `action`: `(180, 6)`
+- 图像：`(180, 480, 640, 3)`（up/side）
+- `svla_so101_pickplace` 结构兼容检查通过
+
+`viz_sdg_rerun.py` 生成 `.rrd` 成功：
+
+- 远端：`/output/rrd_mi308/so101_sdg_episode_0.rrd`（约 29.4 MB）
+- 本地回传：`02_intermediate/sdg_data/so101_sdg_episode_0_mi308.rrd`
+
+### 8.5 结论
+
+在指定 AMD 基础镜像与 headless 条件下，SO-101 Genesis SDG 管线可稳定运行并产出可视化 `.rrd`。  
+当前关键注意事项是固定 `numpy==1.26.4` 以避免 Genesis 二进制 ABI 冲突。
