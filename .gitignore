@@ -8,6 +8,9 @@ sdg_data/
 *.mp4
 *.rrd
 
+# URDF / STL model files (downloaded at runtime)
+**/models/so101_urdf/
+
 # Python
 __pycache__/
 *.pyc
