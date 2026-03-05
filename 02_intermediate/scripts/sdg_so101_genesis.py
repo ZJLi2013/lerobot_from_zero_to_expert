@@ -201,14 +201,15 @@ try:
     )
     ok("Cube added", "3cm red cube at (0.15, 0, 0.015)")
 
-    # Load SO-101 via URDF
+    # Load SO-101 via URDF (fixed=True prevents Genesis from adding a free root joint)
     so101 = scene.add_entity(
         gs.morphs.URDF(
             file=str(urdf_path),
             pos=(0.0, 0.0, 0.0),
+            fixed=True,
         )
     )
-    ok("SO-101 loaded from URDF")
+    ok("SO-101 loaded from URDF (fixed base)")
 
     # Dual cameras matching svla_so101_pickplace layout
     cam_up = scene.add_camera(
