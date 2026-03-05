@@ -18,9 +18,45 @@ POC: Genesis + SO-101 数据管线可行性验证
   python poc_genesis_pipeline.py --frames 20  # 自定义采集帧数
 """
 import argparse
+import os
+import subprocess
 import sys
 import time
 from pathlib import Path
+
+# ── Headless display setup（必须在任何 OpenGL/genesis import 之前）────────────
+def ensure_display():
+    """
+    headless 服务器（无显示器）上 genesis 需要一个 X11 display。
+    若 DISPLAY 未设置，自动尝试启动 Xvfb :99。
+    若 Xvfb 不可用，打印提示后继续（genesis 可能仍失败，但会给出明确错误）。
+    """
+    if os.environ.get("DISPLAY"):
+        print(f"[display] DISPLAY={os.environ['DISPLAY']} (already set)")
+        return
+
+    # 尝试启动 Xvfb
+    xvfb = subprocess.run(["which", "Xvfb"], capture_output=True)
+    if xvfb.returncode != 0:
+        print("[display] WARNING: DISPLAY not set and Xvfb not found.")
+        print("          Install with:  apt-get install -y xvfb")
+        print("          Or run:        export DISPLAY=:99 && Xvfb :99 -screen 0 1280x1024x24 -ac &")
+        return
+
+    print("[display] No DISPLAY detected (headless server). Starting Xvfb :99 ...")
+    proc = subprocess.Popen(
+        ["Xvfb", ":99", "-screen", "0", "1280x1024x24", "-ac", "+extension", "GLX"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    os.environ["DISPLAY"] = ":99"
+    time.sleep(2)
+    if proc.poll() is None:
+        print(f"[display] Xvfb started (PID={proc.pid}, DISPLAY=:99)")
+    else:
+        print("[display] WARNING: Xvfb exited immediately, display may not be available.")
+
+ensure_display()
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
 parser = argparse.ArgumentParser()

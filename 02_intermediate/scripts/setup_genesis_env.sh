@@ -71,6 +71,19 @@ if [[ $CHECK_ONLY -eq 1 ]]; then
     exit 0
 fi
 
+# ── 检查 Xvfb（headless GPU 服务器必需）────────────────────────────
+echo ""
+if command -v Xvfb &>/dev/null; then
+    echo "[OK]  Xvfb 已安装"
+else
+    echo "[--]  Xvfb 未安装（headless 服务器需要）"
+    if [[ $CHECK_ONLY -eq 0 ]]; then
+        echo "[INSTALL] apt-get install xvfb ..."
+        apt-get update -qq && apt-get install -y -qq xvfb libgl1 libgles2 libegl1 libglx-mesa0 2>&1 | tail -3
+        echo "[OK]  Xvfb + OpenGL libs 安装完成"
+    fi
+fi
+
 # ── 安装 genesis-world ────────────────────────────────────────────
 if [[ $GENESIS_OK -eq 0 ]]; then
     echo ""
@@ -85,4 +98,8 @@ echo ""
 echo "============================================================"
 echo "  设置完成，可以运行 POC："
 echo "  python poc_genesis_pipeline.py"
+echo ""
+echo "  注意：headless 服务器会自动启动 Xvfb，也可手动："
+echo "  Xvfb :99 -screen 0 1280x1024x24 -ac &"
+echo "  export DISPLAY=:99"
 echo "============================================================"
