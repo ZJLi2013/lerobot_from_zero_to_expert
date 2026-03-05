@@ -1,0 +1,4 @@
+# Force LF for all shell scripts and Python files
+*.sh   text eol=lf
+*.py   text eol=lf
+*.md   text eol=lf
