@@ -59,6 +59,15 @@ def joint_comfort_score(q_rad, limits):
     return score
 
 
+def parse_csv_floats(text):
+    vals = []
+    for item in text.split(","):
+        item = item.strip()
+        if item:
+            vals.append(float(item))
+    return vals
+
+
 def download_urdf(target_dir: Path):
     hf_base = "https://huggingface.co/haixuantao/dora-bambot/resolve/main/URDF"
     urdf_filename = "so101.urdf"
@@ -113,6 +122,12 @@ def main():
     parser.add_argument("--gripper-close", type=float, default=20.0)
     parser.add_argument("--close-hold-steps", type=int, default=12)
     parser.add_argument("--lift-threshold", type=float, default=0.01)
+    parser.add_argument("--grasp-offset-x", type=float, default=0.0)
+    parser.add_argument("--grasp-offset-y", type=float, default=0.0)
+    parser.add_argument("--grasp-offset-z", type=float, default=0.0)
+    parser.add_argument("--auto-tune-offset", action="store_true")
+    parser.add_argument("--offset-x-candidates", default="-0.008,-0.004,0.0,0.004,0.008")
+    parser.add_argument("--offset-y-candidates", default="-0.010,-0.005,0.0,0.005,0.010")
     args = parser.parse_args()
 
     import torch
@@ -223,6 +238,7 @@ def main():
         "gripper_close_deg": args.gripper_close,
         "close_hold_steps": args.close_hold_steps,
         "lift_threshold_m": args.lift_threshold,
+        "grasp_offset_initial": [args.grasp_offset_x, args.grasp_offset_y, args.grasp_offset_z],
         "episodes": [],
     }
 
@@ -254,13 +270,89 @@ def main():
                 q_deg[5] = grip_deg
             return q_deg
 
-        q_home = home_deg.copy()
-        q_pre = solve_ik(cube_pos + np.array([0.0, 0.0, 0.10]), args.gripper_open)
-        q_approach = solve_ik(cube_pos + np.array([0.0, 0.0, 0.025]), args.gripper_open)
-        q_close = q_approach.copy()
-        if n_dofs >= 6:
-            q_close[5] = args.gripper_close
-        q_lift = solve_ik(cube_pos + np.array([0.0, 0.0, 0.16]), args.gripper_close)
+        def build_key_poses(offset_x, offset_y, offset_z):
+            off = np.array([offset_x, offset_y, offset_z], dtype=np.float64)
+            q_home_local = home_deg.copy()
+            q_pre_local = solve_ik(cube_pos + off + np.array([0.0, 0.0, 0.10]), args.gripper_open)
+            q_approach_local = solve_ik(cube_pos + off + np.array([0.0, 0.0, 0.025]), args.gripper_open)
+            q_close_local = q_approach_local.copy()
+            if n_dofs >= 6:
+                q_close_local[5] = args.gripper_close
+            q_lift_local = solve_ik(cube_pos + off + np.array([0.0, 0.0, 0.16]), args.gripper_close)
+            return q_home_local, q_pre_local, q_approach_local, q_close_local, q_lift_local
+
+        def run_trial(offset_x, offset_y, offset_z):
+            # Reset robot and cube so each candidate is comparable.
+            so101.set_qpos(home_rad)
+            so101.control_dofs_position(home_rad, dof_idx)
+            cube.set_pos(torch.tensor(cube_pos, dtype=torch.float32, device=gs.device).unsqueeze(0))
+            for _ in range(20):
+                scene.step()
+
+            q_home_t, q_pre_t, q_approach_t, q_close_t, q_lift_t = build_key_poses(offset_x, offset_y, offset_z)
+
+            def lerp(a, b, n):
+                return [a + (b - a) * (i + 1) / max(n, 1) for i in range(n)]
+
+            trial_traj = []
+            trial_phases = []
+            trial_traj += lerp(q_home_t, q_pre_t, 15); trial_phases += ["move_pre"] * 15
+            trial_traj += lerp(q_pre_t, q_approach_t, 15); trial_phases += ["approach"] * 15
+            trial_traj += lerp(q_approach_t, q_close_t, 10); trial_phases += ["close"] * 10
+            trial_traj += [q_close_t.copy() for _ in range(args.close_hold_steps)]; trial_phases += ["close_hold"] * args.close_hold_steps
+            trial_traj += lerp(q_close_t, q_lift_t, 20); trial_phases += ["lift"] * 20
+
+            z_before = None
+            z_after = None
+            for target_deg, phase in zip(trial_traj, trial_phases):
+                target_rad = np.deg2rad(np.array(target_deg, dtype=np.float32))
+                so101.control_dofs_position(target_rad, dof_idx)
+                scene.step()
+                z_now = float(to_numpy(cube.get_pos())[2])
+                if phase == "close" and z_before is None:
+                    z_before = z_now
+                if phase == "lift":
+                    z_after = z_now
+
+            if z_before is None:
+                z_before = float(to_numpy(cube.get_pos())[2])
+            if z_after is None:
+                z_after = float(to_numpy(cube.get_pos())[2])
+            return z_after - z_before
+
+        # Optional automatic offset search (x/y grid).
+        chosen_offset = np.array([args.grasp_offset_x, args.grasp_offset_y, args.grasp_offset_z], dtype=np.float64)
+        if args.auto_tune_offset:
+            x_candidates = parse_csv_floats(args.offset_x_candidates)
+            y_candidates = parse_csv_floats(args.offset_y_candidates)
+            best_delta = -1e9
+            best_xy = (chosen_offset[0], chosen_offset[1])
+            search_log = []
+            for ox in x_candidates:
+                for oy in y_candidates:
+                    try:
+                        delta = run_trial(ox, oy, chosen_offset[2])
+                    except Exception:
+                        delta = -1.0
+                    search_log.append({"offset_x": ox, "offset_y": oy, "lift_delta": float(delta)})
+                    if delta > best_delta:
+                        best_delta = delta
+                        best_xy = (ox, oy)
+            chosen_offset[0] = best_xy[0]
+            chosen_offset[1] = best_xy[1]
+            metrics["auto_tune"] = {
+                "enabled": True,
+                "best_offset_xy": [float(chosen_offset[0]), float(chosen_offset[1])],
+                "best_lift_delta": float(best_delta),
+                "search_log": search_log,
+            }
+        else:
+            metrics["auto_tune"] = {"enabled": False}
+
+        metrics["selected_grasp_offset"] = [float(chosen_offset[0]), float(chosen_offset[1]), float(chosen_offset[2])]
+        q_home, q_pre, q_approach, q_close, q_lift = build_key_poses(
+            chosen_offset[0], chosen_offset[1], chosen_offset[2]
+        )
 
         # Build trajectory with explicit hold after close
         def lerp(a, b, n):
