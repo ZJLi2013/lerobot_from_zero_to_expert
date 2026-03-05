@@ -9,7 +9,7 @@
 #   bash 01_beginner/run_viz_docker.sh save  0        # 保存 .rrd 文件
 #
 # 在远端节点运行（需同时 clone lerobot 和 lerobot_from_zero_to_expert）
-# Web 模式运行后，本地浏览器访问: http://10.161.176.110:9090
+# Web 模式运行后，本地浏览器访问: http://<4090_HOST>:9090
 # 或 SSH 转发后访问:              http://localhost:9090
 
 MODE=${1:-stats}

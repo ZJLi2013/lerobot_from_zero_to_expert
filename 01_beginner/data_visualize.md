@@ -1,7 +1,7 @@
 # LeRobot 数据集可视化指南
 
 > 数据集: `lerobot/svla_so101_pickplace`  
-> 测试节点: `david@10.161.176.110`（远端 headless 服务器，双卡 RTX 4090，无显示器）
+> 测试节点: `david@<4090_HOST>`（远端 headless 服务器，双卡 RTX 4090，无显示器）
 
 ---
 
@@ -71,8 +71,8 @@ Rerun 内置 Web Viewer，在远端服务器启动后，本地浏览器直接打
 ### 3.1 远端启动（Docker 方式）
 
 ```bash
-# 在远端节点 david@10.161.176.110 上执行
-ssh david@10.161.176.110
+# 在远端节点 david@<4090_HOST> 上执行
+ssh david@<4090_HOST>
 
 # 方法一：使用封装好的脚本（推荐）
 bash ~/github/lerobot_from_zero_to_expert/01_beginner/run_viz_docker.sh web 0
@@ -100,21 +100,21 @@ docker run --rm  -it --gpus all \
 启动成功后输出：
 ```
 ✓ Rerun Web Viewer 已启动
-✓ 浏览器访问:  http://10.161.176.110:9090
-✓ 桌面 rerun:  python -m rerun "rerun+http://10.161.176.110:9876/proxy"
+✓ 浏览器访问:  http://<4090_HOST>:9090
+✓ 桌面 rerun:  python -m rerun "rerun+http://<4090_HOST>:9876/proxy"
 ```
 
 ### 3.2 本地访问
 
 **直接访问**（如果服务器端口对外开放）：
 ```
-浏览器打开: http://10.161.176.110:9090
+浏览器打开: http://<4090_HOST>:9090
 ```
 
 **SSH 端口转发**（如果服务器有防火墙）：
 ```powershell
 # 在本地 PowerShell 执行端口转发（保持终端开着，-N 表示只转发不执行命令）
-ssh -L 9090:localhost:9090 -L 9876:localhost:9876 david@10.161.176.110 -N
+ssh -L 9090:localhost:9090 -L 9876:localhost:9876 david@<4090_HOST> -N
 
 # 方式一：浏览器打开（最简单，无需安装任何工具）
 Start-Process "http://localhost:9090"
@@ -128,7 +128,7 @@ python -m rerun "rerun+http://localhost:9876/proxy"
 不使用 Docker，直接在远端 conda 环境中运行：
 ```bash
 # 远端（已安装 lerobot + rerun-sdk）
-ssh david@10.161.176.110
+ssh david@<4090_HOST>
 
 # 激活环境（如果使用 conda）
 conda activate lerobot
@@ -191,7 +191,7 @@ lerobot-dataset-viz \
 
 ```bash
 # 在本地机器执行
-scp david@10.161.176.110:~/lerobot_viz_output/lerobot_svla_so101_pickplace_episode_0.rrd .
+scp david@<4090_HOST>:~/lerobot_viz_output/lerobot_svla_so101_pickplace_episode_0.rrd .
 ```
 
 ### 4.3 本地打开
@@ -242,7 +242,7 @@ python ~/github/lerobot_from_zero_to_expert/01_beginner/viz_dataset_so101.py \
 
 ```bash
 # 在本地执行
-scp -r david@10.161.176.110:~/lerobot_viz_output/ .
+scp -r david@<4090_HOST>:~/lerobot_viz_output/ .
 open lerobot_viz_output/frames_episode_0.png
 ```
 
@@ -268,9 +268,9 @@ lerobot-dataset-viz \
   --web-port 9090
 
 # 本地连接（Windows PowerShell）:
-python -m rerun "rerun+http://10.161.176.110:9876/proxy"
+python -m rerun "rerun+http://<4090_HOST>:9876/proxy"
 # 或浏览器（无需安装任何工具）:
-# http://10.161.176.110:9090
+# http://<4090_HOST>:9090
 
 # 保存 .rrd（远端执行）:
 lerobot-dataset-viz \
@@ -320,17 +320,17 @@ lerobot-dataset-viz \
 
 ```bash
 # 检查 Docker 镜像是否存在
-ssh david@10.161.176.110 "docker images pytorch/pytorch:2.8.0-cuda12.6-cudnn9-devel"
+ssh david@<4090_HOST> "docker images pytorch/pytorch:2.8.0-cuda12.6-cudnn9-devel"
 
 # 检查 GPU
-ssh david@10.161.176.110 "nvidia-smi --query-gpu=name,memory.total --format=csv,noheader"
+ssh david@<4090_HOST> "nvidia-smi --query-gpu=name,memory.total --format=csv,noheader"
 ```
 
 ### Step 2：启动可视化服务
 
 ```bash
 # SSH 登录远端
-ssh david@10.161.176.110
+ssh david@<4090_HOST>
 
 # 确保代码最新
 cd ~/github/lerobot && git pull --ff-only
@@ -348,7 +348,7 @@ bash ~/github/lerobot_from_zero_to_expert/01_beginner/run_viz_docker.sh web 0
 ```bash
 # 端口转发（-N 表示只转发不执行命令，保持运行）
 ssh -L 9090:localhost:9090 -L 9876:localhost:9876 \
-    david@10.161.176.110 -N
+    david@<4090_HOST> -N
 ```
 
 ### Step 4：本地浏览器访问
@@ -360,7 +360,7 @@ http://localhost:9090
 
 或者（如果端口对外开放）：
 ```
-http://10.161.176.110:9090
+http://<4090_HOST>:9090
 ```
 
 ### Step 5：浏览数据
