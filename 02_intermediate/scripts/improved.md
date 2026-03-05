@@ -215,7 +215,151 @@ KV = [50,  50,  40,  40,  30,  20]
 
 ---
 
-## 五、参考
+## 五、新增问题：朝向正确但未抓取到 box（buggy2）
+
+### 5.1 现象（当前版本）
+
+- 夹爪朝向已经正确（朝下），box 也在桌面上；
+- 但夹爪闭合后没有把 box 抬起，box 仍停留在机器人基座附近；
+- Rerun 中看起来是“手到位了，但没有形成有效抓取”。
+
+### 5.2 高概率根因
+
+#### 根因 A：IK 目标使用了 `gripper` link，而不是抓取 TCP (`gripperframe`)
+
+当前脚本优先使用 `gripper` 作为末端 link。`gripper` 是机械结构本体，不是抓取参考点；  
+其原点与指尖中心有偏差。结果是：
+
+- IK 让“腕部中心”到达 box 上方，但夹爪实际接触点偏了；
+- 闭合时容易擦边/顶到，而不是把 box 包进夹爪。
+
+> 结论：抓取轨迹应统一基于 `gripperframe`（或显式 TCP offset）计算。
+
+#### 根因 B：cube 随机工作区偏到基座附近，接近不可抓区域
+
+改进脚本中 cube 随机范围约为：
+
+```python
+cx in [0.02, 0.10], cy in [-0.06, 0.06]
+```
+
+这个范围对修正后的 SO-101 来说偏近基座，容易发生：
+
+- 腕部/前臂与基座自碰撞风险上升；
+- 姿态解可行但抓取夹角不理想；
+- 夹爪闭合路径与 box 接触几何不稳定。
+
+> 结论：应把抓取区域前移到“前方舒适工作区”（例如 x≈0.12~0.20）。
+
+#### 根因 C：gripper 第 6 关节“开/合角”未标定
+
+脚本直接使用了 `gripper_deg=25` 作为“闭合”，但 URDF 的第 6 关节是单指驱动结构，  
+`25°` 不一定对应“足够夹紧 box”的实际开度。
+
+> 结论：必须做一次开合标定（open/close sweep），确认哪个角度组合能稳定夹住 3cm cube。
+
+#### 根因 D：缺少“抓取成功判定 + 闭合稳定段”
+
+当前流程“闭合后马上抬升”，没有：
+
+- 闭合后保持若干仿真步（让接触/摩擦稳定）；
+- 判断 box 是否随夹爪一起抬起（例如 box z 增量阈值）。
+
+> 结论：需要加入 grasp success check，失败就重试或调整参数。
+
+### 5.3 修复方案（建议直接落到脚本）
+
+1. **末端定义修复**
+   - 强制 `ee_link = so101.get_link("gripperframe")`；
+   - 若 `gripperframe` 不可用，再 fallback 到 `gripper`；
+   - 所有 IK 目标都针对 TCP，而不是腕部几何中心。
+
+2. **抓取工作区修复**
+   - cube 采样改为：
+     - `cx ∈ [0.12, 0.20]`
+     - `cy ∈ [-0.05, 0.05]`
+     - `cz = 0.015`
+   - 避免“贴基座”位置，提高轨迹可达性和夹爪接近质量。
+
+3. **夹爪开合标定**
+   - 增加一次性 probe：
+     - `open_deg` 候选：`[50, 60, 70, 80]`
+     - `close_deg` 候选：`[0, 10, 20, 30]`
+   - 通过“闭合后 box 是否被带起”自动选取最佳组合。
+
+4. **抓取流程加稳定段**
+   - `approach -> close -> hold(10~20 steps) -> lift`；
+   - close 后先 `scene.step()` 多步再 lift；
+   - lift 后判断：
+     - `cube_z_after - cube_z_before > 0.01m` 视为抓取成功。
+
+5. **失败保护与日志**
+   - 每个 episode 记录：
+     - `grasp_success` (0/1)
+     - `cube_z_before_close`
+     - `cube_z_after_lift`
+     - `selected_open/close_deg`
+   - 若失败，可在同 episode 内做一次 retry（重新 approach + close）。
+
+### 5.4 验收标准（针对本 bug）
+
+- 1 episode 中至少出现 1 次有效“夹起 + 抬升”；
+- lift 阶段 box 的 z 坐标连续上升并明显离地（>1cm）；
+- Rerun 中可见 box 与夹爪同步运动，而不是留在基座旁；
+- state/action 仍保持在关节限位范围内。
+
+---
+
+## 六、本轮实验计划（4090 + 1 episode/实验）
+
+### 6.1 目标
+
+围绕“**夹爪朝向已正确，但未成功抓取**”问题做小步快跑实验，快速定位最敏感因素：
+
+1. TCP 选择（`gripperframe` vs `gripper`）  
+2. box 工作区（远离基座）  
+3. gripper 开合角（open/close）  
+4. close 后稳定步数（hold）  
+5. 抓取成功判定阈值（lift 后 box 抬升量）
+
+### 6.2 实验分组（每组仅 1 episode，便于快速迭代）
+
+| 实验ID | 目的 | 关键参数 |
+|-------|------|----------|
+| E1_baseline_tcp | 验证 TCP 改动本身收益 | `ee_link=gripperframe`, cube: x[0.12,0.20], y[-0.05,0.05], `open=70`, `close=20`, `hold=12` |
+| E2_close_strong | 验证“更强闭合”是否提升抓取率 | 同 E1，仅 `close=10` |
+| E3_hold_long | 验证接触稳定段是否关键 | 同 E1，仅 `hold=20` |
+| E4_wide_open | 验证较大开度是否更易包络 box | 同 E1，仅 `open=80`, `close=10` |
+
+> 若 E1 已成功抓取，则后续组主要用于“稳定性对比”；若 E1 失败，则优先比较 E2/E3 谁先成功。
+
+### 6.3 统一判据（每组都记录）
+
+- `grasp_success`：是否成功（0/1）  
+- `cube_z_before_close`：闭合前 box 高度  
+- `cube_z_after_lift`：抬升后 box 高度  
+- `cube_lift_delta = after - before`  
+- 判定：`cube_lift_delta > 0.01m` 记为成功
+
+### 6.4 输出物（用于下一轮分析）
+
+每个实验输出独立目录与文件（便于截图对比）：
+
+- `exp_id/states.npy`, `actions.npy`, `images_*.npy`
+- `exp_id/improved_sdg_<exp_id>.rrd`
+- `exp_id/metrics.json`（含成功标记和关键标量）
+
+### 6.5 执行流程
+
+1. 本地更新脚本并 push；  
+2. 4090 pull 后依次运行 E1~E4（每组 1 episode）；  
+3. 回传 `.rrd + metrics.json` 到本地；  
+4. 你按实验ID截图保存；  
+5. 下一轮基于截图 + metrics 做定量收敛（固定最优参数）。
+
+---
+
+## 七、参考
 
 - SO-101 URDF 来源: [haixuantao/dora-bambot](https://huggingface.co/haixuantao/dora-bambot/blob/main/URDF/so101.urdf)
 - URDF 由 `onshape-to-robot` 自动导出，CAD 原点 ≠ 机器人底座原点
