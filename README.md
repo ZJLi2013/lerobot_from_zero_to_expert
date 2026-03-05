@@ -2,7 +2,12 @@
 
 > 从零到精通 LeRobot 机器人学习框架——面向 SO-101 机械臂的实战教程合集
 
-本仓库是 [huggingface/lerobot](https://github.com/huggingface/lerobot) 的配套实践教程，所有脚本均在远端 RTX 4090 节点（`pytorch/pytorch:2.8.0-cuda12.6-cudnn9-devel`）通过 Docker 测试验证。
+本仓库是 [huggingface/lerobot](https://github.com/huggingface/lerobot) 的配套实践教程，所有脚本均已在两种 GPU 平台验证通过：
+
+| 平台 | GPU | Docker 镜像 | 状态 |
+|------|-----|------------|------|
+| NVIDIA | RTX 4090 × 2 (24 GB) | `pytorch/pytorch:2.8.0-cuda12.6-cudnn9-devel` | ✅ 全部通过 |
+| AMD ROCm | MI308X × 8 (192 GB HBM) | `rocm/pytorch:rocm6.4.3_ubuntu24.04_py3.12_pytorch_release_2.6.0` | ✅ 全部通过 |
 
 ---
 
