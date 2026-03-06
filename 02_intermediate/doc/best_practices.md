@@ -2,168 +2,292 @@
 
 > 面向可复用的合成数据流程：稳定朝向、可达抓取、可解释调参、可量化验收。
 
-
-
+---
 
 ## 1) 推荐基线配置
 
-### 1.1 URDF 与场景
+### 1.1 模型与场景
 
-- URDF：`haixuantao/dora-bambot` 的 `so101.urdf`
-- Genesis 加载建议：
-  - `fixed=True`
-  - `pos=(0.163, 0.168, 0.0)`（将工作区域对齐到场景原点附近）
-  - `euler` 从 `(0,0,0)` 起，若朝向异常再做小步调整
+- **MJCF（推荐）**：`so101_new_calib.xml`，来自 HuggingFace `Genesis-Intelligence/assets`
+  - 脚本自动通过 `huggingface_hub.snapshot_download` 下载
+  - 也可手动指定 `--xml /path/to/so101_new_calib.xml`
+- Genesis 加载：`gs.morphs.MJCF(file=..., pos=(0,0,0))`，无需 `fixed=True` 或 `base_offset`
 
-### 1.2 末端执行器定义
+### 1.2 末端执行器
 
-- 抓取优先使用 `gripperframe`（TCP 语义更清晰）
-- 仅在不存在 `gripperframe` 时 fallback 到 `gripper`
+- EE link 搜索顺序：`gripper_link` → `gripperframe` → `gripper` → `Fixed_Jaw`
+- MJCF 模型通常匹配到 `gripper`
 
-### 1.3 相机与工作区
+### 1.3 IK 姿态与 Home
 
-- 顶视与侧视同时保留，确保能观察：
-  - 夹爪-目标相对位置
-  - 抓取后 box 是否随夹爪抬升
+```
+IK_QUAT_DOWN = [0.0, 1.0, 0.0, 0.0]   # 夹爪朝下（wxyz）
+HOME_DEG     = [0, -30, 90, -60, 0, 0]  # 肩→夹爪，单位°
+```
+
+- Home 跟踪误差：MJCF 0.12°（URDF 8.27°，改善 69x）
+- 无需 probe quaternion search，`[0,1,0,0]` 已验证可用
+
+### 1.4 相机与工作区
+
+- 顶视 + 侧视同时保留，确保能观察夹爪-目标相对位置和抓取过程
 - 目标物初始采样建议在前方舒适区：
-  - `x in [0.12, 0.20]`
-  - `y in [-0.05, 0.05]`
-  - 避免贴近基座区域
+  - `x ∈ [0.12, 0.20]`，`y ∈ [-0.05, 0.05]`
+  - 避免贴近基座
 
-### 1.4 控制参数
+### 1.5 控制参数
 
-- 建议起点：
-  - `gripper_open=70`
-  - `gripper_close=20`
-  - `close_hold_steps=12`
-- PD 建议高于默认弱阻尼（例如 2-5x），优先保证位置跟踪稳定
+```
+KP = [500, 500, 400, 400, 300, 200]
+KV = [ 50,  50,  40,  40,  30,  20]
+```
 
 ---
 
-## 2) 调参核心原理
+## 2) Pick-Place 轨迹结构
 
-### 2.1 先几何、后动力学
+抓取采集的核心是一条 **scripted 轨迹**（非学习产生），机械臂按 6 个阶段顺序执行：
 
-抓取失败最常见原因是几何误差，不是“力不够”。
+```
+                    ┌─ [1] move_pre ─────────┐
+                    │  从 Home 移到方块上方    │
+                    ▼                        │
+              ┌─── (pre_grasp) ◉             │
+              │     z = cube + 0.10m         │   [6] return
+              │                              │   回到 Home
+   [2] approach│                              │
+              │                              │
+              ▼                              │
+         (approach) ◉  ← 这里是关键！        │
+              │         z = cube + approach_z │
+   [3] close  │  夹爪从 open → close          │
+              ▼                              │
+         (close_hold) ◉  保持夹紧             │
+              │                              │
+   [4] lift   │  带着方块上升                  │
+              ▼                              │
+           (lift) ◉                          │
+              │    z = cube + 0.15m          │
+              └──────────────────────────────┘
+```
 
-调参顺序建议：
-
-1. **TCP/抓取点对齐**（最重要）
-2. **平面偏移 `offset_x/offset_y`**
-3. **夹爪开合 `open/close`**
-4. **闭合稳定段 `hold`**
-5. （最后）控制增益和速度细节
-
-### 2.2 为什么优先调 `offset_y`
-
-若现象是“box 在单侧爪外缘”，通常是横向偏差主导。  
-先扫 `offset_y` 可最快把 box 拉回两爪中缝；再用 `offset_x` 微调咬合深度。
-
----
-
-## 3) 标准调参实践（1 episode 快速迭代）
-
-### Step A: 固定控制参数
-
-- 固定：`open=70`, `close=20`, `hold=12`
-- 只调抓取偏移：
-  - `offset_y ∈ {-0.010, -0.005, 0, +0.005, +0.010}`
-  - 在最佳 y 上，再扫：
-  - `offset_x ∈ {-0.008, -0.004, 0, +0.004, +0.008}`
-
-### Step B: 固定偏移后调夹爪策略
-
-- `close ∈ {10, 15, 20, 25}`
-- `hold ∈ {12, 20, 30}`
-- 目标：在不触发异常碰撞的前提下提高 lift 成功率
-
-### Step C: 复验
-
-- 用最佳参数再跑 1 episode，输出 `.rrd + metrics.json`
-- 截图记录关键时刻：approach / close / hold / lift
+每个阶段之间用 **线性插值（lerp）** 过渡，步数由 `episode_length × fps` 按比例分配。
 
 ---
 
-## 4) 自动化调参建议
+## 3) 调参核心原理
 
-`3_grasp_experiment.py` 已支持 offset 网格搜索：
+### 3.1 approach_z —— 最关键的参数
 
-- `--auto-tune-offset`
-- `--offset-x-candidates=...`
-- `--offset-y-candidates=...`
+`approach_z` 是 **IK 目标点**（`gripper` link）相对于方块中心的 z 偏移量。
+但 IK 目标点 ≠ 指尖位置，指尖在 gripper frame 下方还有几毫米偏移。
+
+```
+        approach_z = 0.02（默认，太高）       approach_z = 0.0（更低，接近可抓）
+
+     z(m)                                     z(m)
+     0.05 ┤                                   0.05 ┤
+          │                                        │
+     0.04 ┤                                   0.04 ┤
+          │    ┌───┐ ← IK 目标点                    │
+     0.035┤    │ ◉ │   (gripper frame)              │
+          │    │   │                           0.03 ┤ ┌─────┐ ← 方块顶部
+     0.03 ┤ ┌──┤   ├──┐ ← 方块顶部                  │ │     │
+          │ │  └───┘  │                             │ │     │
+     0.015┤ │ ██████ │ ← 方块中心              0.015┤ │██◉██│ ← IK 目标 = 方块中心
+          │ │ ██████ │                              │ │█████│   指尖在两侧包住方块
+     0.00 ┤ └────────┘ ── 桌面                 0.00 ┤ └─────┘ ── 桌面
+          └──────────────────                      └──────────────────
+
+    问题：指尖在方块顶部上方                    正确：指尖能包住方块两侧
+    夹爪"虚握"→ 方块不动                       夹爪产生接触力 → 可以抬起
+```
+
+### 3.2 offset (ox, oy, oz) —— 微调对齐
+
+IK 求解出的夹爪位置与方块中心之间可能存在系统偏差。
+`offset` 是施加在 approach/close/lift 阶段的**额外空间微调**：
+
+```
+            俯视图（从上往下看）
+      y
+      ↑
+      │    每个 · 是一组 (ox, oy) 候选
+      │
+ +0.01│  ·    ·    ·    ·    ·
+      │
++0.005│  ·    ·    ·    ·    ·
+      │
+  0.0 │  ·    ·    ◆    ·    ·     ◆ = 方块中心（IK 默认目标）
+      │                ↑
+-0.005│  ·    ·    ·   ★ ·    ·     ★ = 找到的最佳 offset
+      │
+ -0.01│  ·    ·    ·    ·    ·
+      └──────────────────────→ x
+        -0.01      0.0     +0.01
+```
+
+侧视图（oz 维度效果）：
+
+```
+     oz > 0（太高）          oz = 0（默认）           oz < 0（更低）
+        ┌─┐                    ┌─┐                    ┌─┐
+        │ │ ← 指尖             │ │                    │ │
+        └─┘                    └─┘                    └─┘
+                            ┌──────┐               ┌──────┐
+      ┌──────┐              │██████│               │██│ │██│
+      │██████│              │██████│               │██└─┘██│ ← 指尖在方块侧面
+      └──────┘              └──────┘               └──────┘
+
+     完全不接触             偶尔擦到                 有接触，可能抓住
+     Δz ≈ 0               Δz ≈ 0.005              Δz ≈ 0.01+
+```
+
+### 3.3 gripper close 角度
+
+```
+     close = 25°（不够）              close = 45°（推荐尝试）
+
+        ┌─┐       ┌─┐                  ┌┐     ┌┐
+        │ │       │ │                  ││     ││
+        │ │       │ │                  ││ ███ ││ ← 方块被夹住
+        │ │  ███  │ │ ← 间隙太大       ││ ███ ││
+        │ │  ███  │ │   方块可滑落      └┘     └┘
+        └─┘       └─┘
+```
+
+### 3.4 先几何、后动力学
+
+调参顺序建议（从最高优先级到最低）：
+
+1. **approach_z**（让指尖到方块侧面高度）
+2. **offset_z**（进一步微调高度）
+3. **offset_x / offset_y**（水平对齐）
+4. **gripper_close 角度**（夹持力）
+5. **close_hold_steps**（稳定段）
+6. （最后）控制增益和速度
+
+---
+
+## 4) Trial 与 Full Episode 的差异
+
+`3_grasp_experiment.py` 的自动调参分两步：先跑快速 trial 找最佳 offset，再跑完整 episode 正式采集。
+但两者的轨迹节奏不同，可能导致 **trial 成功但 full episode 失败**：
+
+```
+   Trial（快速试探，~72 步）            Full Episode（完整采集，~240 步）
+
+    ┌── approach (15步) ──┐            ┌── approach (30步) ──────┐
+    │   快速下降到位        │            │   缓慢下降到位           │
+    ├── close (10步) ──┤            ├── close (20步) ──────┤
+    │   迅速闭合 → 方块被    │            │   慢慢闭合 → 还没夹紧时    │
+    │   夹指卡住              │            │   方块已经滑落              │
+    ├── lift (20步) ──┤            ├── close_hold (12步) ─┤
+    │   立即提起              │            │   保持但没夹住              │
+    └── Δz = 0.011 ✓ ──┘            ├── lift (30步) ────┤
+                                       │   空手提起                   │
+                                       └── Δz = 0.000 ✗ ──────┘
+
+   快节奏 = 惯性帮忙                    慢节奏 = 纯靠摩擦力
+   夹爪还没松方块就被提走                摩擦力不够 → 方块留在原地
+```
+
+**解决方案**：
+
+- 增大 `close_hold_steps`（20→30），让夹爪有更多时间建立夹持力
+- 降低 `approach_z`，让指尖真正包住方块
+- 增大 `gripper_close` 角度，产生更大法向力
+
+---
+
+## 5) 自动调参工具
+
+`3_grasp_experiment.py`（MJCF 版）支持三维 offset 网格搜索：
+
+```bash
+python 3_grasp_experiment.py \
+  --exp-id E5_deep_approach \
+  --auto-tune-offset \
+  --approach-z 0.0 \
+  --gripper-close 45 \
+  --close-hold-steps 25 \
+  --offset-x-candidates=-0.01,-0.005,0.0,0.005,0.01 \
+  --offset-y-candidates=-0.01,-0.005,0.0,0.005,0.01 \
+  --offset-z-candidates=-0.02,-0.015,-0.01,-0.005,0.0
+```
 
 自动化逻辑：
 
 1. 固定同一初始 box 位姿
-2. 遍历 `(offset_x, offset_y)` 候选
-3. 每个候选跑短 trial，计算 `lift_delta`
+2. 遍历 `(ox, oy, oz)` 候选（grid search）
+3. 每个候选跑短 trial（~72 步），计算 `lift_delta`
 4. 选择 `lift_delta` 最大的 offset
-5. 用最优 offset 跑正式 episode
+5. 用最优 offset 跑正式 episode，输出 `.rrd + metrics.json`
 
-> 建议：offset 自动化后，再加一轮 `close/hold` 网格搜索，通常比单独扫 offset 更容易突破 0 成功率。
+> E4 实验教训：100 组搜索中，oz=-0.01 层有 7 组有效（Δz>0.005），
+> 而 oz=+0.01 层全部为 0。**approach 高度是成败关键。**
 
 ---
 
-## 5) 判定逻辑（Metrics & Rules）
+## 6) 判定逻辑（Metrics & Rules）
 
-### 5.1 基础指标定义
+### 6.1 基础指标
 
 - `cube_z_before_close`：进入 `close` 阶段前 box 的高度
 - `cube_z_after_lift`：`lift` 阶段末 box 的高度
 - `cube_lift_delta = cube_z_after_lift - cube_z_before_close`
 
-### 5.2 抓取成功判定
+### 6.2 抓取成功判定
 
-推荐阈值：
+| 等级 | 条件 | 含义 |
+|------|------|------|
+| **成功** | `delta > 0.01m` | 方块被稳定抬起 |
+| **临界接触** | `0.002m < delta ≤ 0.01m` | 已接触但夹持不稳 |
+| **未抓取** | `delta ≤ 0.002m` | 未产生有效接触 |
 
-- `grasp_success = 1` 当 `cube_lift_delta > 0.01 m`
-- 否则 `grasp_success = 0`
-
-### 5.3 分级判读（便于调参）
-
-- **成功**：`delta > 0.01 m`
-- **临界接触**：`0.002 m < delta <= 0.01 m`（说明已接触但夹持不稳）
-- **未抓取**：`delta <= 0.002 m`
-
-### 5.4 辅助检查项
+### 6.3 辅助检查项
 
 - `state/action` 是否在关节限位内
 - close 后是否出现明显抖动或反弹
-- side 视图中 box 是否进入两爪中间，而非外侧擦边
+- side 视图中 box 是否进入两爪中间（vs 外侧擦边）
+- `.rrd` 中 `object/cube_z` 曲线是否在 lift 阶段上升
 
 ---
 
-## 6) 结果记录模板（建议）
+## 7) 常见失败模式
+
+| 现象 | 根因 | 对应动作 |
+|------|------|---------|
+| box 完全不动 | approach 太高，指尖没碰到方块 | 降低 `approach_z` (0.02→0.0) |
+| Δz 在 0.002~0.01 之间 | 指尖擦到方块但夹不住 | 增大 `gripper_close`，增大 `close_hold` |
+| trial 成功但 episode 失败 | 慢节奏下摩擦力不够 | 降低 approach + 增大 close + 增大 hold |
+| box 在单侧爪外缘 | 横向偏差主导 | 调 `offset_y` |
+| box 在爪前方被推走 | 纵向接近太深 | 减小 `offset_x` 或增大 `gripper_open` |
+| 动作幅度异常大 | IK 目标超出可达域 | 检查 cube 采样范围是否在舒适区内 |
+
+---
+
+## 8) 结果记录模板
 
 每次实验至少保存：
 
-- `improved_sdg_<exp_id>.rrd`
-- `metrics_<exp_id>.json`
-- 3 张截图：`approach`, `close_end`, `lift_peak`
+- `grasp_<exp_id>.rrd`
+- `metrics.json`（含 search_log）
 
 `metrics.json` 推荐字段：
 
-- `exp_id`
-- `ee_link`
-- `selected_grasp_offset`
-- `gripper_open_deg`, `gripper_close_deg`, `close_hold_steps`
-- `cube_z_before_close`, `cube_z_after_lift`, `cube_lift_delta`, `grasp_success`
-- `state_range_deg`, `action_range_deg`
+```
+exp_id, model, xml_path, ee_link, ik_quat, home_deg,
+gripper_open_deg, gripper_close_deg, approach_z, close_hold_steps,
+selected_grasp_offset,
+cube_z_before_close, cube_z_after_lift, cube_lift_delta, grasp_success,
+auto_tune.best_offset, auto_tune.best_lift_delta, auto_tune.search_log
+```
 
 ---
 
-## 7) 常见失败模式 -> 对应动作
+## 9) 一句话流程
 
-- **box 在单侧爪外缘** -> 先调 `offset_y`
-- **box 在爪前方被推走** -> 减小 `offset_x` 或增大 `open`
-- **close 后有接触但 lift 掉落** -> 增大 `hold`，再微调 `close`
-- **动作幅度异常大** -> 回查 TCP link 与 IK 目标姿态是否一致
+用 MJCF 官方模型 + gripper-down IK，先降 `approach_z` 保证指尖到方块侧面，再用 `offset → close → hold` 三步法 grid search 迭代，以 `cube_lift_delta > 0.01m` 作为统一验收标准。
 
 ---
-
-## 8) 一句话流程
-
-先用正确 TCP 与工作区保证几何可抓，再用 `offset -> close -> hold` 三步法迭代，并用 `cube_lift_delta` / `grasp_success` 做统一验收。
-
----
-
