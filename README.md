@@ -15,8 +15,10 @@
 
 ```
 lerobot_from_zero_to_expert/
-├── 01_beginner/        # 入门：数据认知 + 三种策略训练 + 数据可视化
-└── 02_intermediate/    # 进阶：合成数据生成（SDG）技术路径
+├── 01_beginner/           # 入门：数据认知 + 三种策略训练 + 数据可视化
+└── 02_intermediate/       # 进阶：Genesis × SO-101 合成数据采集管线
+    ├── doc/               #   设计文档 + 调参手册
+    └── scripts/           #   可运行脚本（POC → 基础采集 → 调参 → 并行生产）
 ```
 
 ---
@@ -56,21 +58,31 @@ bash ~/github/lerobot_from_zero_to_expert/01_beginner/run_viz_docker.sh stats 0
 
 ## 02_intermediate — 进阶级
 
-**目标**：深入理解 LeRobot 数据结构，规划合成数据（SDG）管线，为构建大规模训练数据做准备。
+**目标**：在 Genesis 物理仿真中构建 SO-101 合成数据采集管线（SDG），从单环境验证到并行批量生产，输出可训练的 LeRobot v3 数据集。
 
-| 文件 | 说明 |
-|------|------|
-| `sdg.md` | 合成数据生成技术指南：数据字段精解、四条 SDG 路径、Genesis 仿真评估 |
+| 文件 / 目录 | 说明 |
+|-------------|------|
+| `doc/implement_guide.md` | 实现指南：架构设计、环境准备、脚本说明、运行流程、最小命令清单 |
+| `doc/best_practices.md` | 调参与验收手册：基线配置、offset/gripper 调参法、判定指标 |
+| `doc/survey.md` | SDG 技术调研：四条路径对比、Genesis 可行性评估 |
+| `scripts/1_poc_pipeline.py` | Genesis POC 验证管线 |
+| `scripts/2_basic_collect.py` | SO-101 URDF + 双相机 + npy 输出验证 |
+| `scripts/3_improved_collect.py` | 改进版：probe 探测 + 朝向修正 + rrd 输出 |
+| `scripts/4_grasp_experiment.py` | 抓取调参实验（推荐入口），自动 offset 搜索 + metrics.json |
+| `scripts/5_parallel_lerobot.py` | 并行批量采集（N_ENVS 并行 + 域随机化 + 直接写 LeRobot 格式） |
+| `scripts/npy_to_lerobot.py` | npy → LeRobot v3 格式转换 |
 
-**核心内容**：
+**快速开始**（远端 4090 节点）：
 
-- **LeRobot 数据字段精解**：`observation.state` / `action` 的物理含义、单位（度）、与编码器的关系
-- **SDG 四条技术路径**：
-  - 路径 A：物理仿真采集（MuJoCo / Genesis / Isaac Sim）
-  - 路径 B：视频运动重建（Video → IK → 关节角）
-  - 路径 C：World Model 生成新视觉观测
-  - 路径 D：数据增强（最快上手）
-- **Genesis 可行性评估**：Genesis 与 SO-101 / LeRobot 接口天然兼容，10-80x 加速，推荐优先级最高
+```bash
+ssh david@<4090_HOST> "mkdir -p ~/sdg_grasp_exp && docker run --rm --gpus all \
+  -v ~/github/lerobot_from_zero_to_expert:/workspace/lfzte \
+  -v ~/sdg_grasp_exp:/output \
+  genesis_poc:latest \
+  python -u /workspace/lfzte/02_intermediate/scripts/4_grasp_experiment.py \
+  --exp-id E3_auto_offset --episodes 1 --episode-length 6 --save /output \
+  --auto-tune-offset --gripper-open 70 --gripper-close 20 --close-hold-steps 12"
+```
 
 ---
 
@@ -97,11 +109,11 @@ docker run --rm --gpus all \
 ## 路线图
 
 ```
-✅ 01_beginner    — ACT / Diffusion / SmolVLA 训练 demo + 数据可视化
-✅ 02_intermediate — SDG 技术方案 + Genesis 评估
+✅ 01_beginner     — ACT / Diffusion / SmolVLA 训练 demo + 数据可视化
+✅ 02_intermediate  — Genesis × SO-101 合成数据采集管线（POC → 调参 → 并行生产）
 
-🔲 03_advanced    — Genesis 仿真采集管线（SO-101 MuJoCo + 并行环境）
-🔲 04_expert      — SmolVLA / Pi0 大规模微调 + sim-to-real 验证
+🔲 03_advanced     — 大规模 SDG 数据集 + 域随机化 + SmolVLA / Pi0 微调
+🔲 04_expert       — sim-to-real 迁移验证 + 真机部署
 ```
 
 ---

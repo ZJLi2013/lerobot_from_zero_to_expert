@@ -16,7 +16,8 @@
 8. [验收标准](#8-验收标准)
 9. [已知问题与规避](#9-已知问题与规避)
 10. [常见问题](#10-常见问题)
-11. [参考资料](#11-参考资料)
+11. [最小命令清单](#11-最小命令清单)
+12. [参考资料](#12-参考资料)
 
 ---
 
@@ -38,6 +39,7 @@
 ├── doc/
 │   ├── implement_guide.md                 # 本文件
 │   ├── best_practices.md                  # 调参与验收手册
+│   └── survey.md                          # 调研资料
 └── scripts/
     ├── check_deps.py                      # 依赖检查
     ├── 1_poc_pipeline.py                  # Genesis POC 验证管线
@@ -310,7 +312,59 @@ for _ in range(3):
 
 ---
 
-## 11. 参考资料
+## 11. 最小命令清单
+
+
+### 11.1 4090 拉取最新代码
+
+```bash
+ssh david@<4090_HOST> "cd ~/github/lerobot_from_zero_to_expert && git pull origin main"
+```
+
+### 11.2 跑 1 episode（自动 offset 调参）
+
+```bash
+ssh david@<4090_HOST> "mkdir -p ~/sdg_grasp_exp && docker run --rm --gpus all \
+  -v ~/github/lerobot_from_zero_to_expert:/workspace/lfzte \
+  -v ~/sdg_grasp_exp:/output \
+  genesis_poc:latest \
+  python -u /workspace/lfzte/02_intermediate/scripts/4_grasp_experiment.py \
+  --exp-id E3_auto_offset \
+  --episodes 1 \
+  --episode-length 6 \
+  --save /output \
+  --auto-tune-offset \
+  --offset-x-candidates=-0.008,-0.004,0.0,0.004,0.008 \
+  --offset-y-candidates=-0.010,-0.005,0.0,0.005,0.010 \
+  --gripper-open 70 \
+  --gripper-close 20 \
+  --close-hold-steps 12"
+```
+
+### 11.3 回传结果到本地
+
+```powershell
+scp david@<4090_HOST>:~/sdg_grasp_exp/E3_auto_offset/improved_sdg_E3_auto_offset.rrd `
+  "c:\Users\zhengjli\Documents\github\lerobot_from_zero_to_expert\02_intermediate\sdg_data\improved_sdg_E3_auto_offset.rrd"
+
+scp david@<4090_HOST>:~/sdg_grasp_exp/E3_auto_offset/metrics.json `
+  "c:\Users\zhengjli\Documents\github\lerobot_from_zero_to_expert\02_intermediate\sdg_data\metrics_E3_auto_offset.json"
+```
+
+### 11.4 本地快速查看结果
+
+```powershell
+rerun "c:\Users\zhengjli\Documents\github\lerobot_from_zero_to_expert\02_intermediate\sdg_data\improved_sdg_E3_auto_offset.rrd"
+```
+
+判定只看两个值：
+
+- `grasp_success`
+- `cube_lift_delta`（目标 > `0.01m`）
+
+---
+
+## 12. 参考资料
 
 - [Genesis 文档](https://genesis-world.readthedocs.io/)
 - [Genesis examples/manipulation/grasp_env.py](https://github.com/Genesis-Embodied-AI/Genesis/blob/main/examples/manipulation/grasp_env.py)
