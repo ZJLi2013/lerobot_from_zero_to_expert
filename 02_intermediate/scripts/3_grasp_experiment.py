@@ -250,8 +250,10 @@ def main():
         q_test = so101.inverse_kinematics(
             link=ee_link, pos=ik_target, quat=IK_QUAT_DOWN
         )
-        so101.set_qpos(q_test)
-        for _ in range(5):
+        q_test_np = to_numpy(q_test) if hasattr(q_test, 'cpu') else np.array(q_test)
+        so101.set_qpos(q_test_np)
+        so101.control_dofs_position(q_test_np, dof_idx)
+        for _ in range(15):
             scene.step()
         ee_pos_check = to_numpy(ee_link.get_pos())
         ik_err = np.linalg.norm(ee_pos_check - ik_target)
@@ -266,8 +268,10 @@ def main():
                     q_alt = so101.inverse_kinematics(
                         link=so101.get_link(link.name), pos=ik_target, quat=IK_QUAT_DOWN
                     )
-                    so101.set_qpos(q_alt)
-                    for _ in range(5):
+                    q_alt_np = to_numpy(q_alt) if hasattr(q_alt, 'cpu') else np.array(q_alt)
+                    so101.set_qpos(q_alt_np)
+                    so101.control_dofs_position(q_alt_np, dof_idx)
+                    for _ in range(15):
                         scene.step()
                     alt_pos = to_numpy(so101.get_link(link.name).get_pos())
                     alt_err = np.linalg.norm(alt_pos - ik_target)
@@ -361,13 +365,18 @@ def main():
         q_lift = lift_wps[-1]
 
         if verbose:
-            so101.set_qpos(np.deg2rad(np.array(q_approach, dtype=np.float32)))
-            for _ in range(3):
+            q_approach_rad = np.deg2rad(np.array(q_approach, dtype=np.float32))
+            so101.set_qpos(q_approach_rad)
+            so101.control_dofs_position(q_approach_rad, dof_idx)
+            for _ in range(10):
                 scene.step()
             ee_pos = to_numpy(ee_link.get_pos())
             print(f"    [diag] IK approach target: [{pos_approach[0]:.4f}, {pos_approach[1]:.4f}, {pos_approach[2]:.4f}]")
             print(f"    [diag] EE actual position:  [{ee_pos[0]:.4f}, {ee_pos[1]:.4f}, {ee_pos[2]:.4f}]")
             print(f"    [diag] EE offset from target: [{ee_pos[0]-pos_approach[0]:.4f}, {ee_pos[1]-pos_approach[1]:.4f}, {ee_pos[2]-pos_approach[2]:.4f}]")
+            for other_link in so101.links:
+                other_pos = to_numpy(so101.get_link(other_link.name).get_pos())
+                print(f"    [diag] link '{other_link.name}': [{other_pos[0]:.4f}, {other_pos[1]:.4f}, {other_pos[2]:.4f}]")
 
         traj = []
         phases = []
