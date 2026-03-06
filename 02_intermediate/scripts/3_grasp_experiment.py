@@ -153,6 +153,14 @@ def main():
     parser.add_argument("--offset-x-candidates", default="-0.01,-0.005,0.0,0.005,0.01")
     parser.add_argument("--offset-y-candidates", default="-0.01,-0.005,0.0,0.005,0.01")
     parser.add_argument("--offset-z-candidates", default="-0.02,-0.01,0.0,0.01")
+    parser.add_argument("--cube-x-min", type=float, default=0.12,
+                        help="Minimum sampled cube center x in world frame (m)")
+    parser.add_argument("--cube-x-max", type=float, default=0.20,
+                        help="Maximum sampled cube center x in world frame (m)")
+    parser.add_argument("--cube-y-min", type=float, default=-0.05,
+                        help="Minimum sampled cube center y in world frame (m)")
+    parser.add_argument("--cube-y-max", type=float, default=0.05,
+                        help="Maximum sampled cube center y in world frame (m)")
     args = parser.parse_args()
 
     # ── [1] Locate MJCF ──────────────────────────────────────────────────────
@@ -206,6 +214,8 @@ def main():
     print("  ✓ scene built")
     print("  camera[up/debug_side2] = pos=(0.42, 0.34, 0.26), lookat=(0.15, 0.0, 0.08), fov=38")
     print("  camera[side]           = pos=(0.5, -0.4, 0.3), lookat=(0.15, 0.0, 0.1), fov=45")
+    print(f"  cube sampling range    = x[{args.cube_x_min:.3f}, {args.cube_x_max:.3f}], "
+          f"y[{args.cube_y_min:.3f}, {args.cube_y_max:.3f}]")
 
     # ── [3] Joints + EE + PD + Home ──────────────────────────────────────────
     stage("3/6  Joints + PD + Home")
@@ -590,8 +600,8 @@ def main():
 
         # Randomize cube
         cube_pos = np.array([
-            np.random.uniform(0.12, 0.20),
-            np.random.uniform(-0.05, 0.05),
+            np.random.uniform(args.cube_x_min, args.cube_x_max),
+            np.random.uniform(args.cube_y_min, args.cube_y_max),
             0.015,
         ])
         cube.set_pos(torch.tensor(cube_pos, dtype=torch.float32, device=gs.device).unsqueeze(0))
