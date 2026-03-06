@@ -286,7 +286,71 @@ auto_tune.best_offset, auto_tune.best_lift_delta, auto_tune.search_log
 
 ---
 
-## 9) 一句话流程
+## 9) 实验日志（E4–E8, 2026-03-06）
+
+以下是从 URDF 迁移到 MJCF 后，系统化调试抓取的实验记录。
+
+### 9.1 实验汇总
+
+| 实验 | approach_z | gripper_close | close_hold | 特殊变更 | Trial 最佳 Δz | Episode Δz | 结论 |
+|------|-----------|---------------|------------|----------|--------------|-----------|------|
+| E4 | 0.02 | 25 | 12 | — baseline | **0.011m ✓** | 0.000 ✗ | oz=-0.01 层有效，首次发现 trial-episode gap |
+| E5 | **0.0** | 45 | 25 | approach 拉低 | 0.003m | 0.000 ✗ | 太低，IK 目标在桌面，反而更差 |
+| E6 | 0.02 | 45 | 25 | episode_length=4(快节奏) | **0.0105m ✓** | **-0.0035** ✗ | 首次观察到 cube 被推高(0.015→0.018)，说明有接触 |
+| E7 | 0.02 | 45 | 25 | 无 auto-tune，直接用 E6 offset | — | 0.000 ✗ | offset 与 cube 位置耦合，不可直接迁移 |
+| E8 | 0.02 | 45 | 25 | **Cartesian 笛卡尔下降**(6 IK waypoints) + velocity reset | **0.0115m ✓** | 0.000 ✗ | 笛卡尔路径未消除 gap |
+
+### 9.2 关键发现
+
+1. **Trial 稳定成功**：auto-tune grid search 能在 125 组候选中找到 Δz > 0.01m 的 offset（E4/E6/E8 均复现）
+2. **Full episode 始终失败**：使用完全相同的 offset、相同的 Cartesian 路径、相同的 close/hold 步数，full episode 的 Δz ≈ 0
+3. **已排除的假设**：
+
+| 假设 | 实验 | 结果 |
+|------|------|------|
+| 关节空间插值造成侧向摆动 | E8 笛卡尔下降 | ✗ 未解决 |
+| 残留速度污染初态 | E8 velocity reset | ✗ 未解决 |
+| episode 节奏太慢 | E6 episode_length=4 | ✗ 未解决（节奏更快但依然失败）|
+| approach_z 太高 | E5 approach_z=0.0 | ✗ 反而更差 |
+| offset 不泛化 | E7 跨 cube 位置使用 | ✓ 已确认 offset 与位置耦合 |
+
+4. **E6 物理线索**：cube 在 approach 阶段被推高 3.5mm → close 阶段后回落，说明指尖**确实接触到了方块**，但夹持力不足以保持
+5. **Genesis 参考**：`grasp_env.py` 中 Franka 的 `finger_tip_z_offset = -0.06m`，且 Franka 使用双独立指 DOF；SO-101 是单 DOF gripper，机构完全不同
+
+### 9.3 当前根因分析
+
+Trial 成功但 episode 失败的可能原因（待验证）：
+
+```
+  Trial (自动调参阶段)                     Full Episode (正式采集)
+  ────────────────────                     ──────────────────────
+  scene 已执行 N 轮 trial                  scene.reset → 重新定位 cube
+  ↓                                        ↓
+  robot 从 上一轮 trial 结尾               robot 从 home 精确重置
+  的关节状态开始 set_qpos                  ↓
+  ↓                                        build_trajectory → IK 从 home 状态解
+  build_key_poses → IK 从 当前状态 解      ↓
+  ↓                                        execute trajectory
+  execute trial traj
+  ↓
+  IK seed 状态不同 → 解不同 → 指尖实际位置不同!
+```
+
+**核心假设**：IK 迭代求解器（CCD/DLS）的解依赖初始 seed（当前 qpos）。
+Trial 在 N 轮反复执行后，robot 的 qpos 可能自然停留在接近 approach 的位姿，
+使得 IK 收敛到一个"更好"的解。Full episode 从 home（远离目标）开始求解，
+可能收敛到一个不同的局部最优，导致指尖实际位置偏差几毫米。
+
+### 9.4 下一步计划
+
+1. **IK seed 对齐**：full episode 调用 `build_trajectory` 前先 `set_qpos` 到 pre-grasp 附近再求解 IK
+2. **打印 EE 实际位置**：在 trial 和 episode 的 close 阶段前分别打印 `ee_link.get_pos()`，比对差异
+3. **scene.reset() 替代手动 reset**：确保 trial 后 physics state 完全干净
+4. **PD gains 对比**：尝试 `1_poc_pipeline.py` 的低增益方案（kp=100 vs 500），减少接触时的弹射力
+
+---
+
+## 10) 一句话流程
 
 用 MJCF 官方模型 + gripper-down IK，先降 `approach_z` 保证指尖到方块侧面，再用 `offset → close → hold` 三步法 grid search 迭代，以 `cube_lift_delta > 0.01m` 作为统一验收标准。
 
