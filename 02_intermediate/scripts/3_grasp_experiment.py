@@ -209,9 +209,13 @@ def main():
     for j in so101.joints:
         print(f"    joint: {j.name}")
 
+    print("  链接列表:")
+    for link in so101.links:
+        print(f"    • {link.name}")
+
     ee_link = None
     ee_name = None
-    for candidate in ["gripper_link", "gripperframe", "gripper", "Fixed_Jaw"]:
+    for candidate in ["Moving_Jaw", "Fixed_Jaw", "gripper_link", "gripperframe", "gripper"]:
         try:
             ee_link = so101.get_link(candidate)
             ee_name = candidate
@@ -240,12 +244,48 @@ def main():
     print(f"  HOME = {home_deg.tolist()}")
     print(f"  tracking: mean_err={home_err:.2f}°")
 
-    # IK sanity check
+    # IK sanity check — verify the solution actually reaches the target
     try:
+        ik_target = np.array([0.15, 0.0, 0.08])
         q_test = so101.inverse_kinematics(
-            link=ee_link, pos=np.array([0.15, 0.0, 0.08]), quat=IK_QUAT_DOWN
+            link=ee_link, pos=ik_target, quat=IK_QUAT_DOWN
         )
-        print(f"  ✓ IK sanity check passed")
+        so101.set_qpos(q_test)
+        for _ in range(5):
+            scene.step()
+        ee_pos_check = to_numpy(ee_link.get_pos())
+        ik_err = np.linalg.norm(ee_pos_check - ik_target)
+        print(f"  IK sanity: target={ik_target.tolist()}, actual=[{ee_pos_check[0]:.4f}, {ee_pos_check[1]:.4f}, {ee_pos_check[2]:.4f}], err={ik_err:.4f}m")
+        if ik_err > 0.02:
+            print(f"  ✗ IK error too large ({ik_err:.4f}m > 0.02m) — wrong EE link?")
+            print(f"    Trying other links for better IK...")
+            for link in so101.links:
+                try:
+                    q_alt = so101.inverse_kinematics(
+                        link=so101.get_link(link.name), pos=ik_target, quat=IK_QUAT_DOWN
+                    )
+                    so101.set_qpos(q_alt)
+                    for _ in range(5):
+                        scene.step()
+                    alt_pos = to_numpy(so101.get_link(link.name).get_pos())
+                    alt_err = np.linalg.norm(alt_pos - ik_target)
+                    if alt_err < 0.02:
+                        print(f"    ★ link '{link.name}' works! err={alt_err:.4f}m")
+                        ee_link = so101.get_link(link.name)
+                        ee_name = link.name
+                        ik_err = alt_err
+                        break
+                    elif alt_err < 0.05:
+                        print(f"    ~ link '{link.name}' partial: err={alt_err:.4f}m")
+                except Exception:
+                    pass
+        if ik_err < 0.02:
+            print(f"  ✓ IK sanity check passed (EE link = {ee_name}, err={ik_err:.4f}m)")
+        else:
+            print(f"  ⚠ IK accuracy limited (err={ik_err:.4f}m), proceeding anyway")
+        so101.set_qpos(home_rad)
+        for _ in range(30):
+            scene.step()
     except Exception as e:
         print(f"  ✗ IK failed: {e}")
         sys.exit(1)
