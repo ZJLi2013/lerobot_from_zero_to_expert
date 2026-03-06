@@ -191,9 +191,12 @@ def main():
     )
     print(f"  ✓ SO-101 loaded via MJCF")
 
+    # For grasp debugging, keep one proven side view and reuse the old "up"
+    # stream as a second oblique side view from the opposite side. This makes it
+    # much easier to judge whether the cube is actually entering the pinch region.
     cam_up = scene.add_camera(
         res=(args.img_w, args.img_h),
-        pos=(0.0, 0.0, 0.7), lookat=(0.15, 0.0, 0.0), fov=55, GUI=False,
+        pos=(0.42, 0.34, 0.26), lookat=(0.15, 0.0, 0.08), fov=38, GUI=False,
     )
     cam_side = scene.add_camera(
         res=(args.img_w, args.img_h),
@@ -201,6 +204,8 @@ def main():
     )
     scene.build()
     print("  ✓ scene built")
+    print("  camera[up/debug_side2] = pos=(0.42, 0.34, 0.26), lookat=(0.15, 0.0, 0.08), fov=38")
+    print("  camera[side]           = pos=(0.5, -0.4, 0.3), lookat=(0.15, 0.0, 0.1), fov=45")
 
     # ── [3] Joints + EE + PD + Home ──────────────────────────────────────────
     stage("3/6  Joints + PD + Home")
@@ -217,7 +222,7 @@ def main():
 
     ee_link = None
     ee_name = None
-    for candidate in ["moving_jaw_so101_v1", "Moving_Jaw", "Fixed_Jaw", "gripper_link", "gripperframe", "gripper"]:
+    for candidate in ["grasp_center", "moving_jaw_so101_v1", "Moving_Jaw", "Fixed_Jaw", "gripper_link", "gripperframe", "gripper"]:
         try:
             ee_link = so101.get_link(candidate)
             ee_name = candidate
@@ -275,6 +280,8 @@ def main():
                 )
         except Exception as e:
             print(f"  TCP proxy unavailable: {e}")
+    elif ee_name == "grasp_center":
+        print("  grasp_center link detected: using fixed TCP from MJCF asset")
 
     # IK sanity check — verify the solution actually reaches the target
     try:
