@@ -142,6 +142,8 @@ def main():
                         help="Gripper open angle in degrees")
     parser.add_argument("--gripper-close", type=float, default=25.0,
                         help="Gripper close angle in degrees")
+    parser.add_argument("--pre-close-steps", type=int, default=0,
+                        help="Number of hold steps at the approach pose before closing")
     parser.add_argument("--close-hold-steps", type=int, default=12)
     parser.add_argument("--lift-threshold", type=float, default=0.01)
     parser.add_argument("--approach-z", type=float, default=0.02,
@@ -530,6 +532,9 @@ def main():
             prev = wp
 
         n_close = max(8, total_steps // 12)
+        if args.pre_close_steps > 0:
+            traj += [q_approach.copy() for _ in range(args.pre_close_steps)]
+            phases += ["pre_close_hold"] * args.pre_close_steps
         traj += lerp(q_approach, q_close, n_close)
         phases += ["close"] * n_close
 
