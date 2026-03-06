@@ -252,7 +252,10 @@ def main():
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
-    def solve_ik(pos, grip_deg):
+    def solve_ik_seeded(pos, grip_deg, seed_rad=None):
+        """Solve IK with explicit seed to ensure consistent solutions."""
+        if seed_rad is not None:
+            so101.set_qpos(seed_rad)
         q = to_numpy(so101.inverse_kinematics(link=ee_link, pos=pos, quat=IK_QUAT_DOWN))
         q_deg = np.rad2deg(q)
         if n_dofs >= 6:
@@ -262,41 +265,66 @@ def main():
     def lerp(a, b, n):
         return [a + (b - a) * (i + 1) / max(n, 1) for i in range(n)]
 
-    def cartesian_descent(cube_pos, off, z_from, z_to, grip_deg, n_waypoints=5):
-        """Solve IK at multiple intermediate heights for straight-line descent."""
-        waypoints = []
-        for i in range(n_waypoints):
-            frac = (i + 1) / n_waypoints
-            z = z_from + (z_to - z_from) * frac
-            pos = cube_pos + off + np.array([0.0, 0.0, z])
-            waypoints.append(solve_ik(pos, grip_deg))
-        return waypoints
-
     def reset_scene(cube_pos, settle_steps=30):
         """Full reset: position + velocity for robot and cube."""
         so101.set_qpos(home_rad)
         so101.control_dofs_position(home_rad, dof_idx)
-        so101.set_dofs_velocity(np.zeros(n_dofs, dtype=np.float32), dof_idx)
+        so101.zero_all_dofs_velocity()
         cube.set_pos(torch.tensor(cube_pos, dtype=torch.float32, device=gs.device).unsqueeze(0))
         cube.set_quat(torch.tensor([1, 0, 0, 0], dtype=torch.float32, device=gs.device).unsqueeze(0))
+        cube.zero_all_dofs_velocity()
         for _ in range(settle_steps):
             scene.step()
 
-    def build_trajectory(cube_pos, offset_x, offset_y, offset_z, total_steps):
-        """Build trajectory with Cartesian-space descent to avoid lateral swing."""
+    def build_trajectory_chained_ik(cube_pos, offset_x, offset_y, offset_z, total_steps, verbose=False):
+        """Build trajectory with chained IK seeding: each solve uses the previous solution as seed."""
         off = np.array([offset_x, offset_y, offset_z])
-        q_pre = solve_ik(cube_pos + off + np.array([0.0, 0.0, 0.10]), args.gripper_open)
-        q_approach = solve_ik(
-            cube_pos + off + np.array([0.0, 0.0, args.approach_z]), args.gripper_open
-        )
+
+        pos_pre = cube_pos + off + np.array([0.0, 0.0, 0.10])
+        pos_approach = cube_pos + off + np.array([0.0, 0.0, args.approach_z])
+        pos_lift = cube_pos + off + np.array([0.0, 0.0, 0.15])
+
+        q_pre = solve_ik_seeded(pos_pre, args.gripper_open, seed_rad=home_rad)
+        q_pre_rad = np.deg2rad(np.array(q_pre, dtype=np.float32))
+
+        n_descent_wps = 6
+        descent_wps = []
+        prev_rad = q_pre_rad
+        for i in range(n_descent_wps):
+            frac = (i + 1) / n_descent_wps
+            z = 0.10 + (args.approach_z - 0.10) * frac
+            pos = cube_pos + off + np.array([0.0, 0.0, z])
+            wp = solve_ik_seeded(pos, args.gripper_open, seed_rad=prev_rad)
+            descent_wps.append(wp)
+            prev_rad = np.deg2rad(np.array(wp, dtype=np.float32))
+
+        q_approach = descent_wps[-1]
         q_close = q_approach.copy()
         if n_dofs >= 6:
             q_close[5] = args.gripper_close
-        q_lift = solve_ik(cube_pos + off + np.array([0.0, 0.0, 0.15]), args.gripper_close)
 
-        descent_wps = cartesian_descent(
-            cube_pos, off, 0.10, args.approach_z, args.gripper_open, n_waypoints=6
-        )
+        q_close_rad = np.deg2rad(np.array(q_close, dtype=np.float32))
+        n_lift_wps = 4
+        lift_wps = []
+        prev_rad = q_close_rad
+        for i in range(n_lift_wps):
+            frac = (i + 1) / n_lift_wps
+            z = args.approach_z + (0.15 - args.approach_z) * frac
+            pos = cube_pos + off + np.array([0.0, 0.0, z])
+            wp = solve_ik_seeded(pos, args.gripper_close, seed_rad=prev_rad)
+            lift_wps.append(wp)
+            prev_rad = np.deg2rad(np.array(wp, dtype=np.float32))
+
+        q_lift = lift_wps[-1]
+
+        if verbose:
+            so101.set_qpos(np.deg2rad(np.array(q_approach, dtype=np.float32)))
+            for _ in range(3):
+                scene.step()
+            ee_pos = to_numpy(ee_link.get_pos())
+            print(f"    [diag] IK approach target: [{pos_approach[0]:.4f}, {pos_approach[1]:.4f}, {pos_approach[2]:.4f}]")
+            print(f"    [diag] EE actual position:  [{ee_pos[0]:.4f}, {ee_pos[1]:.4f}, {ee_pos[2]:.4f}]")
+            print(f"    [diag] EE offset from target: [{ee_pos[0]-pos_approach[0]:.4f}, {ee_pos[1]-pos_approach[1]:.4f}, {ee_pos[2]-pos_approach[2]:.4f}]")
 
         traj = []
         phases = []
@@ -305,7 +333,7 @@ def main():
         traj += lerp(home_deg.copy(), q_pre, n_move)
         phases += ["move_pre"] * n_move
 
-        steps_per_wp = max(3, total_steps // (8 * len(descent_wps)))
+        steps_per_wp = max(3, total_steps // (8 * n_descent_wps))
         prev = q_pre
         for wp in descent_wps:
             traj += lerp(prev, wp, steps_per_wp)
@@ -320,10 +348,7 @@ def main():
         traj += [q_close.copy() for _ in range(n_hold)]
         phases += ["close_hold"] * n_hold
 
-        lift_wps = cartesian_descent(
-            cube_pos, off, args.approach_z, 0.15, args.gripper_close, n_waypoints=4
-        )
-        steps_per_lift = max(5, total_steps // (8 * len(lift_wps)))
+        steps_per_lift = max(5, total_steps // (8 * n_lift_wps))
         prev = q_close
         for wp in lift_wps:
             traj += lerp(prev, wp, steps_per_lift)
@@ -339,10 +364,12 @@ def main():
         return traj, phases
 
     def run_trial(cube_pos, offset_x, offset_y, offset_z):
-        """Quick trial: reset → Cartesian descent → close → lift → measure delta_z."""
+        """Quick trial: reset → chained-IK descent → close → lift → measure delta_z."""
         reset_scene(cube_pos, settle_steps=20)
 
-        traj, phases = build_trajectory(cube_pos, offset_x, offset_y, offset_z, total_steps=90)
+        traj, phases = build_trajectory_chained_ik(
+            cube_pos, offset_x, offset_y, offset_z, total_steps=90
+        )
 
         z_before = None
         z_after = None
@@ -454,9 +481,9 @@ def main():
 
         reset_scene(cube_pos, settle_steps=30)
 
-        trajectory, labels = build_trajectory(
+        trajectory, labels = build_trajectory_chained_ik(
             cube_pos, chosen_offset[0], chosen_offset[1], chosen_offset[2],
-            total_steps=steps_per_episode,
+            total_steps=steps_per_episode, verbose=True,
         )
 
         ep_data = {
