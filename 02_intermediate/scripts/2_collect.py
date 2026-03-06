@@ -91,7 +91,7 @@ def render_camera(cam):
 
 
 def find_so101_xml(user_path=None):
-    """Search for so101_new_calib.xml in common locations."""
+    """Search for so101_new_calib.xml in common locations, auto-download from HF if needed."""
     if user_path:
         p = Path(user_path)
         if p.exists():
@@ -119,6 +119,22 @@ def find_so101_xml(user_path=None):
     for p in candidates:
         if p.exists():
             return p
+
+    try:
+        from huggingface_hub import snapshot_download
+        print("  … downloading SO101 MJCF from Genesis-Intelligence/assets")
+        asset_dir = snapshot_download(
+            repo_type="dataset",
+            repo_id="Genesis-Intelligence/assets",
+            allow_patterns="SO101/*",
+            max_workers=1,
+        )
+        p = Path(asset_dir) / "SO101" / "so101_new_calib.xml"
+        if p.exists():
+            return p
+    except Exception as e:
+        print(f"  … HF download failed: {e}")
+
     return None
 
 

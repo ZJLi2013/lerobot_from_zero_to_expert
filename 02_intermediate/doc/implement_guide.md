@@ -400,3 +400,5 @@ rerun "c:\Users\zhengjli\Documents\github\lerobot_from_zero_to_expert\02_interme
 - [LeRobot Dataset Format](https://github.com/huggingface/lerobot/blob/main/docs/datasets.md)
 - [robosim-so101-pickup-v2（MuJoCo 版参考数据集）](https://huggingface.co/datasets/houmans/robosim-so101-pickup-v2)
 - [so101-autogen（Isaac Sim 版参考实现）](https://github.com/haoran1062/so101-autogen)
+- [haixuantao/dora-bambot](https://huggingface.co/haixuantao/dora-bambot/blob/main/URDF/so101.urdf)
+
