@@ -12,6 +12,7 @@ Usage:
   python 3_grasp_experiment.py --xml /path/to/so101.xml --exp-id E3
 """
 import argparse
+import inspect
 import json
 import os
 import subprocess
@@ -245,7 +246,11 @@ def main():
     print(f"  HOME = {home_deg.tolist()}")
     print(f"  tracking: mean_err={home_err:.2f}°")
 
+    ik_supports_local_point = "local_point" in inspect.signature(so101.inverse_kinematics).parameters
+    print(f"  IK supports local_point = {ik_supports_local_point}")
+
     tcp_local_point = None
+    tcp_world_offset = None
     if ee_name == "moving_jaw_so101_v1":
         try:
             gripper_ref = so101.get_link("gripper")
@@ -253,27 +258,38 @@ def main():
             jaw_quat = to_numpy(ee_link.get_quat())
             grip_pos = to_numpy(gripper_ref.get_pos())
             tcp_world = 0.5 * (jaw_pos + grip_pos)
-            tcp_local_point = gu.inv_transform_by_quat(tcp_world - jaw_pos, jaw_quat)
-            print(
-                "  TCP proxy (jaw<->gripper midpoint): "
-                f"world=[{tcp_world[0]:.4f}, {tcp_world[1]:.4f}, {tcp_world[2]:.4f}], "
-                f"local=[{tcp_local_point[0]:.4f}, {tcp_local_point[1]:.4f}, {tcp_local_point[2]:.4f}]"
-            )
+            tcp_world_offset = tcp_world - jaw_pos
+            if ik_supports_local_point:
+                tcp_local_point = gu.inv_transform_by_quat(tcp_world_offset, jaw_quat)
+                print(
+                    "  TCP proxy (jaw<->gripper midpoint): "
+                    f"world=[{tcp_world[0]:.4f}, {tcp_world[1]:.4f}, {tcp_world[2]:.4f}], "
+                    f"local=[{tcp_local_point[0]:.4f}, {tcp_local_point[1]:.4f}, {tcp_local_point[2]:.4f}]"
+                )
+            else:
+                print(
+                    "  TCP proxy (jaw<->gripper midpoint): "
+                    f"world=[{tcp_world[0]:.4f}, {tcp_world[1]:.4f}, {tcp_world[2]:.4f}], "
+                    f"world_offset=[{tcp_world_offset[0]:.4f}, {tcp_world_offset[1]:.4f}, {tcp_world_offset[2]:.4f}]"
+                )
         except Exception as e:
             print(f"  TCP proxy unavailable: {e}")
 
     # IK sanity check — verify the solution actually reaches the target
     try:
         ik_target = np.array([0.15, 0.0, 0.08])
-        q_test = so101.inverse_kinematics(
+        ik_target_link = ik_target if tcp_world_offset is None or ik_supports_local_point else (ik_target - tcp_world_offset)
+        ik_kwargs = dict(
             link=ee_link,
-            pos=ik_target,
+            pos=ik_target_link,
             quat=None,
-            local_point=tcp_local_point,
             init_qpos=home_rad,
             max_solver_iters=50,
             damping=0.02,
         )
+        if ik_supports_local_point and tcp_local_point is not None:
+            ik_kwargs["local_point"] = tcp_local_point
+        q_test = so101.inverse_kinematics(**ik_kwargs)
         q_test_np = to_numpy(q_test) if hasattr(q_test, 'cpu') else np.array(q_test)
         so101.set_qpos(q_test_np)
         so101.control_dofs_position(q_test_np, dof_idx)
@@ -281,7 +297,12 @@ def main():
             scene.step()
         ee_pos_check = to_numpy(ee_link.get_pos())
         ee_quat_check = to_numpy(ee_link.get_quat())
-        tcp_check = ee_pos_check if tcp_local_point is None else ee_pos_check + gu.transform_by_quat(tcp_local_point, ee_quat_check)
+        if ik_supports_local_point and tcp_local_point is not None:
+            tcp_check = ee_pos_check + gu.transform_by_quat(tcp_local_point, ee_quat_check)
+        elif tcp_world_offset is not None:
+            tcp_check = ee_pos_check + tcp_world_offset
+        else:
+            tcp_check = ee_pos_check
         ik_err = np.linalg.norm(tcp_check - ik_target)
         print(
             f"  IK sanity: target={ik_target.tolist()}, "
@@ -337,12 +358,12 @@ def main():
         q = to_numpy(
             so101.inverse_kinematics(
                 link=ee_link,
-                pos=pos,
+                pos=pos if tcp_world_offset is None or ik_supports_local_point else (pos - tcp_world_offset),
                 quat=None,
-                local_point=tcp_local_point,
                 init_qpos=seed_rad,
                 max_solver_iters=50,
                 damping=0.02,
+                **({"local_point": tcp_local_point} if ik_supports_local_point and tcp_local_point is not None else {}),
             )
         )
         q_deg = np.rad2deg(q)
@@ -413,7 +434,12 @@ def main():
                 scene.step()
             ee_pos = to_numpy(ee_link.get_pos())
             ee_quat = to_numpy(ee_link.get_quat())
-            tcp_pos = ee_pos if tcp_local_point is None else ee_pos + gu.transform_by_quat(tcp_local_point, ee_quat)
+            if ik_supports_local_point and tcp_local_point is not None:
+                tcp_pos = ee_pos + gu.transform_by_quat(tcp_local_point, ee_quat)
+            elif tcp_world_offset is not None:
+                tcp_pos = ee_pos + tcp_world_offset
+            else:
+                tcp_pos = ee_pos
             print(f"    [diag] IK approach target: [{pos_approach[0]:.4f}, {pos_approach[1]:.4f}, {pos_approach[2]:.4f}]")
             print(f"    [diag] EE actual position:  [{ee_pos[0]:.4f}, {ee_pos[1]:.4f}, {ee_pos[2]:.4f}]")
             print(f"    [diag] TCP actual position: [{tcp_pos[0]:.4f}, {tcp_pos[1]:.4f}, {tcp_pos[2]:.4f}]")
