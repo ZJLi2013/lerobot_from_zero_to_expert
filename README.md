@@ -66,10 +66,9 @@ bash ~/github/lerobot_from_zero_to_expert/01_beginner/run_viz_docker.sh stats 0
 | `doc/best_practices.md` | 调参与验收手册：基线配置、offset/gripper 调参法、判定指标 |
 | `doc/survey.md` | SDG 技术调研：四条路径对比、Genesis 可行性评估 |
 | `scripts/1_poc_pipeline.py` | Genesis POC 验证管线 |
-| `scripts/2_basic_collect.py` | SO-101 URDF + 双相机 + npy 输出验证 |
-| `scripts/3_improved_collect.py` | 改进版：probe 探测 + 朝向修正 + rrd 输出 |
-| `scripts/4_grasp_experiment.py` | 抓取调参实验（推荐入口），自动 offset 搜索 + metrics.json |
-| `scripts/5_parallel_lerobot.py` | 并行批量采集（N_ENVS 并行 + 域随机化 + 直接写 LeRobot 格式） |
+| `scripts/2_collect.py` | SO-101 采集（probe + 朝向修正 + .rrd 输出） |
+| `scripts/3_grasp_experiment.py` | 抓取调参实验（推荐入口），自动 offset 搜索 + metrics.json |
+| `scripts/4_parallel_lerobot.py` | 并行批量采集（N_ENVS 并行 + 域随机化 + 直接写 LeRobot 格式） |
 | `scripts/npy_to_lerobot.py` | npy → LeRobot v3 格式转换 |
 
 **快速开始**（远端 4090 节点）：
@@ -79,7 +78,7 @@ ssh david@<4090_HOST> "mkdir -p ~/sdg_grasp_exp && docker run --rm --gpus all \
   -v ~/github/lerobot_from_zero_to_expert:/workspace/lfzte \
   -v ~/sdg_grasp_exp:/output \
   genesis_poc:latest \
-  python -u /workspace/lfzte/02_intermediate/scripts/4_grasp_experiment.py \
+  python -u /workspace/lfzte/02_intermediate/scripts/3_grasp_experiment.py \
   --exp-id E3_auto_offset --episodes 1 --episode-length 6 --save /output \
   --auto-tune-offset --gripper-open 70 --gripper-close 20 --close-hold-steps 12"
 ```

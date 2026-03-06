@@ -15,10 +15,9 @@
 ## 本目录关键脚本
 
 - `scripts/1_poc_pipeline.py`：Genesis POC 验证管线
-- `scripts/2_basic_collect.py`：基础 SO-101 SDG 采集
-- `scripts/3_improved_collect.py`：改进版（probe + 内置 rrd）
-- `scripts/4_grasp_experiment.py`：1-episode 调参实验
-- `scripts/5_parallel_lerobot.py`：并行批量采集 + 直接写 LeRobot 格式
+- `scripts/2_collect.py`：SO-101 采集（probe + 朝向修正 + .rrd 输出）
+- `scripts/3_grasp_experiment.py`：1-episode 调参实验
+- `scripts/4_parallel_lerobot.py`：并行批量采集 + 直接写 LeRobot 格式
 - `scripts/viz_sdg_rerun.py`：`npy -> .rrd`
 - `scripts/npy_to_lerobot.py`：`npy -> LeRobot v3`
 

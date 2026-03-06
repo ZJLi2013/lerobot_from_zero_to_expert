@@ -1,4 +1,4 @@
-# 5_parallel_lerobot.py
+# 4_parallel_lerobot.py
 """
 Genesis × SO-101 合成数据批量生成脚本
 
@@ -10,7 +10,7 @@ Genesis × SO-101 合成数据批量生成脚本
 - 输出 LeRobot HuggingFace Dataset 格式
 
 用法：
-    python 5_parallel_lerobot.py \
+    python 4_parallel_lerobot.py \
         --n_envs 64 \
         --n_episodes 500 \
         --repo_id your_hf_username/so101-genesis-pickplace \

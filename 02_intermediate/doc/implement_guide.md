@@ -43,12 +43,10 @@
 └── scripts/
     ├── check_deps.py                      # 依赖检查
     ├── 1_poc_pipeline.py                  # Genesis POC 验证管线
-    ├── 2_basic_collect.py                 # 验证 SO-101 URDF + 双相机 + npy 输出结构
-    ├── 3_improved_collect.py              # 加入 probe、朝向/姿态改进、内置 `.rrd` 输出
-    ├── 4_grasp_experiment.py              # 抓取调参实验(推荐)，支持自动 offset 搜索与 `metrics.json` 记录
-    ├── 5_parallel_lerobot.py              # 并行批量采集（N_ENVS 并行 + 域随机化 + 直接写 LeRobot 格式）
+    ├── 2_collect.py                       # SO-101 采集（probe + .rrd 输出）
+    ├── 3_grasp_experiment.py              # 抓取调参实验(推荐)，自动 offset 搜索 + metrics.json
+    ├── 4_parallel_lerobot.py              # 并行批量采集（N_ENVS 并行 + 域随机化 + 直接写 LeRobot 格式）
     ├── viz_sdg_rerun.py                   # Rerun 可视化回放
-    ├── npy_to_lerobot.py                  # npy → LeRobot v3 格式 (parquet + mp4 + meta)
     ├── setup_genesis_env.sh               # Genesis 环境搭建脚本
     ├── run_poc_docker.sh                  # Docker 方式运行 POC
     └── reports.md                         # 实验报告
@@ -80,22 +78,52 @@
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-### 3.1 关节定义（与 LeRobot SO-101 完全对齐）
+### 3.1 关节定义（LeRobot SO-101）
+
+```
+                          SO-101  6-DOF 机械臂关节示意图
+                              （侧视 · Home 姿态）
+
+          [1] shoulder_lift                    运动类型     角度范围(约)
+               ◉─────────────── 大臂 ──┐      ↕ 俯仰      -90° ~ +90°
+              ╱                         │
+             ╱ [0] shoulder_pan         │
+      ↺ 水平旋转                   [2] elbow_flex
+            │                           ◉      ↕ 俯仰      -120° ~ +120°
+       ┌────┴────┐                      │
+       │ ▓▓▓▓▓▓ │                       │
+       │  底座   │                  小臂 │
+       │ ▓▓▓▓▓▓ │                       │
+       └────────┘                  [3] wrist_flex
+      ▀▀▀▀▀▀▀▀▀▀▀▀                     ◉      ↕ 俯仰      -90° ~ +90°
+      ═══桌面═══                        │
+                                   [4] wrist_roll
+                                        ◉      ↻ 自旋      -180° ~ +180°
+                                        │
+                                   [5] gripper
+                                      ┌─◉─┐
+                                      │   │    ↔ 开合      0° ~ 70°
+                                      ╘═══╛
+
+    关节编号    名称              LeRobot motor name       控制单位
+    ─────────────────────────────────────────────────────────────
+      [0]     shoulder_pan       shoulder_pan.pos          度(°)
+      [1]     shoulder_lift      shoulder_lift.pos         度(°)
+      [2]     elbow_flex         elbow_flex.pos            度(°)
+      [3]     wrist_flex         wrist_flex.pos            度(°)
+      [4]     wrist_roll         wrist_roll.pos            度(°)
+      [5]     gripper            gripper.pos               度(°)
+```
 
 ```python
-# SO-101 有 6 个自由度（lerobot 惯例，角度制）
 JOINT_NAMES = [
-    "shoulder_pan",   # 0
-    "shoulder_lift",  # 1
-    "elbow_flex",     # 2
-    "wrist_flex",     # 3
-    "wrist_roll",     # 4
-    "gripper",        # 5 (0=open, max=closed)
+    "shoulder_pan",   # 0 — 底座水平旋转
+    "shoulder_lift",  # 1 — 大臂俯仰
+    "elbow_flex",     # 2 — 肘部弯曲
+    "wrist_flex",     # 3 — 手腕俯仰
+    "wrist_roll",     # 4 — 手腕自旋
+    "gripper",        # 5 — 夹爪开合 (0=张开, max=闭合)
 ]
-
-# LeRobot 数据集 motor names
-MOTOR_NAMES = [f"{j}.pos" for j in JOINT_NAMES]
-# → ["shoulder_pan.pos", "shoulder_lift.pos", ...]
 ```
 
 ---
@@ -131,19 +159,18 @@ python -c "import genesis as gs; gs.init(); print('Genesis OK')"
 | 编号 | 脚本 | 作用 | 输出 |
 |------|------|------|------|
 | 1 | `1_poc_pipeline.py` | Genesis 环境 POC 验证 | 控制台日志 |
-| 2 | `2_basic_collect.py` | SO-101 URDF + 双相机 + 基础采集 | `npy + .rrd` |
-| 3 | `3_improved_collect.py` | probe 探测 + 朝向改进 + rrd 输出 | `npy + .rrd` |
-| 4 | `4_grasp_experiment.py` | 抓取调参实验（推荐入口） | `npy + .rrd + metrics.json` |
-| 5 | `5_parallel_lerobot.py` | N_ENVS 并行 + 域随机化 + LeRobot 格式 | LeRobot v3 Dataset |
+| 2 | `2_collect.py` | SO-101 采集（probe + 朝向修正） | `.rrd + npy` |
+| 3 | `3_grasp_experiment.py` | 抓取调参实验（推荐入口） | `.rrd + metrics.json` |
+| 4 | `4_parallel_lerobot.py` | N_ENVS 并行 + 域随机化 + LeRobot 格式 | LeRobot v3 Dataset |
 
-### 5.1 推荐运行方式（Docker + 4_grasp_experiment）
+### 5.1 推荐运行方式（Docker + 3_grasp_experiment）
 
 ```bash
 docker run --rm --gpus all \
   -v ~/github/lerobot_from_zero_to_expert:/workspace/lfzte \
   -v ~/sdg_grasp_exp:/output \
   genesis_poc:latest \
-  python -u /workspace/lfzte/02_intermediate/scripts/4_grasp_experiment.py \
+  python -u /workspace/lfzte/02_intermediate/scripts/3_grasp_experiment.py \
   --exp-id E3_auto_offset \
   --episodes 1 \
   --episode-length 6 \
@@ -156,9 +183,9 @@ docker run --rm --gpus all \
   --close-hold-steps 12"
 ```
 
-### 5.2 并行批量采集（5_parallel_lerobot）
+### 5.2 并行批量采集（4_parallel_lerobot）
 
-**[5_parallel_lerobot.py](../scripts/5_parallel_lerobot.py)**
+**[4_parallel_lerobot.py](../scripts/4_parallel_lerobot.py)**
 
 核心组件：
 
@@ -170,7 +197,7 @@ docker run --rm --gpus all \
 - `create_lerobot_dataset()` — 创建 LeRobot v3 数据集
 
 ```bash
-python scripts/5_parallel_lerobot.py \
+python scripts/4_parallel_lerobot.py \
     --n_envs 64 \
     --n_episodes 500 \
     --repo_id your_hf_username/so101-genesis-pickplace \
@@ -328,7 +355,7 @@ ssh david@<4090_HOST> "mkdir -p ~/sdg_grasp_exp && docker run --rm --gpus all \
   -v ~/github/lerobot_from_zero_to_expert:/workspace/lfzte \
   -v ~/sdg_grasp_exp:/output \
   genesis_poc:latest \
-  python -u /workspace/lfzte/02_intermediate/scripts/4_grasp_experiment.py \
+  python -u /workspace/lfzte/02_intermediate/scripts/3_grasp_experiment.py \
   --exp-id E3_auto_offset \
   --episodes 1 \
   --episode-length 6 \

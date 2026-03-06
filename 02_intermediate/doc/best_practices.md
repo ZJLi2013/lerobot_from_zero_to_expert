@@ -3,6 +3,8 @@
 > 面向可复用的合成数据流程：稳定朝向、可达抓取、可解释调参、可量化验收。
 
 
+
+
 ## 1) 推荐基线配置
 
 ### 1.1 URDF 与场景
@@ -84,7 +86,7 @@
 
 ## 4) 自动化调参建议
 
-`4_grasp_experiment.py` 已支持 offset 网格搜索：
+`3_grasp_experiment.py` 已支持 offset 网格搜索：
 
 - `--auto-tune-offset`
 - `--offset-x-candidates=...`

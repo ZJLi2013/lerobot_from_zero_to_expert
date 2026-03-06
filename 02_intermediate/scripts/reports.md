@@ -11,7 +11,7 @@
 | 脚本 | 定位 | 结果 |
 |------|------|------|
 | `genesis_quick_start.py` | 数据管线可行性验证（Franka fallback） | **8/8 全部通过** |
-| `2_basic_collect.py` | SO-101 URDF 真机模型 SDG 验证 | **7/7 全部通过** |
+| `2_collect.py` | SO-101 URDF 真机模型 SDG 验证 | **7/7 全部通过** |
 
 ---
 
@@ -107,7 +107,7 @@ images_side: (720, 480, 640, 3), range=[10, 255]
 docker run --rm --gpus all \
   -v ~/github/lerobot_from_zero_to_expert:/workspace/lfzte \
   genesis_poc:v2 \
-  python -u /workspace/lfzte/02_intermediate/scripts/2_basic_collect.py \
+  python -u /workspace/lfzte/02_intermediate/scripts/2_collect.py \
     --episodes 3 --fps 30 --save /tmp/sdg_so101_output
 ```
 
@@ -262,7 +262,7 @@ lerobot_dataset/
 | GPU | AMD Instinct MI308X × 8 (`gfx942`) |
 | 基础镜像 | `rocm/pytorch:rocm6.4.3_ubuntu24.04_py3.12_pytorch_release_2.6.0` |
 | 运行模式 | **Headless**（脚本内 `Xvfb :99`） |
-| 测试脚本 | `02_intermediate/scripts/2_basic_collect.py` |
+| 测试脚本 | `02_intermediate/scripts/2_collect.py` |
 | 可视化脚本 | `02_intermediate/scripts/viz_sdg_rerun.py` |
 
 ### 8.2 兼容性处理
@@ -288,14 +288,14 @@ docker run --rm \
   bash -lc '
     apt-get update && apt-get install -y xvfb libgl1 libgles2 libegl1 libglx-mesa0 libxrender1 &&
     python -m pip install --no-input numpy==1.26.4 genesis-world rerun-sdk &&
-    python -u /workspace/lfzte/02_intermediate/scripts/2_basic_collect.py --episodes 1 --episode-length 6 --save /output/npy_mi308 &&
+    python -u /workspace/lfzte/02_intermediate/scripts/2_collect.py --episodes 1 --episode-length 6 --save /output/npy_mi308 &&
     python -u /workspace/lfzte/02_intermediate/scripts/viz_sdg_rerun.py --input /output/npy_mi308 --output /output/rrd_mi308 --episodes 0
   '
 ```
 
 ### 8.4 结果
 
-`2_basic_collect.py` 在 MI308 上 **7/7 全部通过**：
+`2_collect.py` 在 MI308 上 **7/7 全部通过**：
 
 - 1 episode / 180 frames
 - `state`: `(180, 6)`, `action`: `(180, 6)`

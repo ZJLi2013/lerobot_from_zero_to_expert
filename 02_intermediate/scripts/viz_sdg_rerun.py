@@ -1,7 +1,7 @@
 """
 SDG 合成数据 Rerun 可视化
 =========================
-直接读取 2_basic_collect.py 输出的 npy 文件，生成 .rrd 文件。
+直接读取 2_collect.py 输出的 npy 文件，生成 .rrd 文件。
 本地用 `rerun <file>.rrd` 打开即可同步查看：
   - 双相机图像 (up / side)
   - 6 维 state 曲线
