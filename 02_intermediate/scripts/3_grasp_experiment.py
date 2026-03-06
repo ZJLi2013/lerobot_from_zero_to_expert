@@ -57,6 +57,15 @@ def render_camera(cam):
     return arr.astype(np.uint8)
 
 
+def save_rgb_png(arr, path):
+    try:
+        from PIL import Image
+        Image.fromarray(arr).save(path)
+    except ImportError:
+        import imageio.v2 as imageio
+        imageio.imwrite(path, arr)
+
+
 def parse_csv_floats(text):
     return [float(x.strip()) for x in text.split(",") if x.strip()]
 
@@ -169,6 +178,10 @@ def main():
                         help="If set, fix cube center y to this world-frame value (m)")
     parser.add_argument("--cube-fixed-z", type=float, default=0.015,
                         help="Cube center z to use when a fixed cube pose is requested (m)")
+    parser.add_argument("--export-close-debug-pngs", action="store_true",
+                        help="Export dense stitched PNGs around the close phase for debugging")
+    parser.add_argument("--debug-close-context", type=int, default=4,
+                        help="Frames to include before/after the close-related phases in debug PNG export")
     args = parser.parse_args()
 
     # ── [1] Locate MJCF ──────────────────────────────────────────────────────
@@ -602,7 +615,31 @@ def main():
         "episodes": [],
     }
 
+    out_dir = Path(args.save) / args.exp_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+
     all_episodes = []
+
+    def export_close_debug_pngs(ep_data, ep_idx):
+        close_like = {"pre_close_hold", "close", "close_hold"}
+        close_indices = [i for i, phase in enumerate(ep_data["phase"]) if phase in close_like]
+        if not close_indices:
+            return
+
+        start = max(0, close_indices[0] - args.debug_close_context)
+        end = min(len(ep_data["phase"]), close_indices[-1] + args.debug_close_context + 1)
+        debug_dir = out_dir / "close_debug_pngs"
+        debug_dir.mkdir(parents=True, exist_ok=True)
+
+        for i in range(start, end):
+            stitched = np.concatenate(
+                [ep_data["observation.images.up"][i], ep_data["observation.images.side"][i]],
+                axis=1,
+            )
+            phase = ep_data["phase"][i]
+            png_path = debug_dir / f"ep{ep_idx:02d}_f{i:03d}_{phase}.png"
+            save_rgb_png(stitched, png_path)
+        print(f"  ✓ exported close debug PNGs: {debug_dir} (frames {start}-{end - 1})")
 
     for ep in range(args.episodes):
         # Reset
@@ -724,6 +761,8 @@ def main():
             ep_data["phase"].append(phase)
 
         all_episodes.append(ep_data)
+        if args.export_close_debug_pngs:
+            export_close_debug_pngs(ep_data, ep)
         if cube_z_before_close is None:
             cube_z_before_close = float(to_numpy(cube.get_pos())[2])
         if cube_z_after_lift is None:
@@ -747,9 +786,6 @@ def main():
     # ── [6] Save ──────────────────────────────────────────────────────────────
     stage("6/6  保存")
     import rerun as rr
-
-    out_dir = Path(args.save) / args.exp_id
-    out_dir.mkdir(parents=True, exist_ok=True)
 
     all_states = np.concatenate([np.stack(e["observation.state"]) for e in all_episodes])
     all_actions = np.concatenate([np.stack(e["action"]) for e in all_episodes])

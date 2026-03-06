@@ -388,37 +388,9 @@ auto_tune.best_offset, auto_tune.best_lift_delta, auto_tune.search_log
    - `moving_jaw_so101_v1` 比 `gripper` 更接近夹爪，但仍不等于真正的 pinch center。
    - 最稳定的做法是在官方 `gripperframe` site 上增加一个固定 `body/link`，命名为 `grasp_center`。
 
-2. **对当前 4090 容器里的 `Genesis 0.4.0`，最实用方案是“改 MJCF”，不是依赖新 IK API。**
-   - 远端运行时不支持 `local_point`。
-   - 因此最稳妥的兼容方案是把 TCP 直接固化进资产，而不是在脚本里继续做 proxy。
-
 3. **`grasp_center` 路线已经验证结构正确。**
    - 在 4090 上，`grasp_center` 的 IK sanity 误差约 `0.0002m`。
    - 这说明“EE/TCP 定义错误”这个主冲突已经解决。
-
-4. **当前剩余问题已经收敛成毫米级抓取调参问题。**
-   - `offset` 现在只是微调项，不再承担修正结构误差的职责。
-   - 当前优先级最高的变量是：
-     - `approach_z`
-     - `offset_z`
-     - `close_hold_steps`
-
-5. **当前最优 full episode 是 `E23`。**
-   - `approach_z=0.012`
-   - `gripper_close=45`
-   - `close_hold_steps=50`
-   - `cube_lift_delta=+0.0018m`
-   - 这里的读法是：
-     - `approach_z=0.012` = 抓取目标点位于方块中心上方 `12mm`
-     - `gripper_close=45` = 夹爪那个“开合关节”的目标闭合角度是 `45°`
-        - 描述的是**关节角命令**，不是“两爪之间还剩多少毫米缝隙”
-        - 一般来说数值更大表示夹得更紧一些，但不是越大越好，过大也可能把方块挤走
-     - `close_hold_steps=50` = 夹爪合上后先保持 `50` 个仿真步，再进入 lift
-     - `cube_lift_delta=+0.0018m` = 方块最终只被抬高了 `1.8mm`
-     - cube_pos=[x,y,z] = 方块中心的世界坐标
-   - 还没达到成功阈值 `0.01m`，但已经表明该高度窗口和更长 hold 是有效方向。
-  
-
 
 
 
@@ -426,82 +398,28 @@ auto_tune.best_offset, auto_tune.best_lift_delta, auto_tune.search_log
 
 | 实验 | 当前应记住的结论 |
 |------|------------------|
-| E9-E12 | 早期真正的根因不是轨迹节奏，而是 EE/TCP 定义错误；`gripper` 不能直接拿来做 IK 目标 |
-| E14 | 4090 容器运行时是 `Genesis 0.4.0`，不支持 `local_point`，不能默认本地源码 API 等于远端可用 API |
-| E17 | 改 MJCF 时必须连同完整资产目录一起维护，不能只复制单个 XML |
-| E18 | `grasp_center` 方案打通后，IK 精度进入毫米级，结构性问题解除 |
 | E20-E24 | 进入真正抓取调参阶段；`approach_z=0.012` 附近优于 `0.01/0.015`，`hold` 增加有帮助，但“更大闭合角”不一定更好 |
-| E23 截图复盘 | 从 side view 看，夹爪已能碰到 box，但 box 没有很好进入两爪中间；当前更像是 `offset_y` 主导的居中偏差，`offset_x` 次之 |
-| E25 | 基于 `E23` 固定 `approach_z=0.012 / close=45 / hold=50`，只细扫 `x/y`；best offset 变成 `[0.01, 0.015, -0.008]` | 支持“先往 `y+` 方向居中”这个判断，但仅改 `x/y` 还不足以直接带来稳定 episode lift |
-| E26 | 在 `E25` 基础上继续缩小 `x/y` 搜索范围，best offset 变成 `[0.005, 0.01, -0.008]` | 再次选中 `y+`，说明“往 `y+` 居中”方向是稳定信号；但最优 `x/y` 会随 box 位姿变化，单次截图不能直接给出全局最优值 |
-| E27 | 固定 `x/y` 在 `E25/E26` 的正向小偏移区间内，再细扫 `offset_z` | 对当前这次 cube 位姿没有带来收益，说明“`y+` 有帮助”不是无条件成立，`x/y/z` 仍和具体位姿耦合 |
-| E28 | 回到更保守的小范围 `x/y/z`，并把 `close_hold_steps` 提到 `70` | episode 得到 `+0.0010m`，说明更长 hold 仍有一些帮助；但仍低于 `E23` 的 `+0.0018m`，所以当前全局最好结果仍是 `E23` |
+| E30 | 双侧斜视角 + 中间稳区采样 + auto-tune-offset | 跟新camera pose 方便debug |
+| E36 - 37 | 独立 gripper 标定：扫 `-20,-10,0,10,20,30,40,50` 并导出 PNG | 已确认 **gripper 数值越大，夹爪张口越大**；之前把正值当“close”在物理上是错误的 |
+| E38-E41 | 固定 `E33` 的 pose/几何后，测试 `gripper_close=-20,-10,0` | 三者 episode 都约 `+0.0006m`；gripper_close 方向问题已经从“未知”变成“已知”，但抓取失败的主因仍然是 TCP 目标点没有把 box 放进 pinch 区域。|
 
-### 9.3 可沉淀为最佳实践的踩坑结论
 
-1. **不要用大范围 `offset` 去补一个错误的 TCP 定义。**
-   - 先修 EE/TCP，再调 `offset`。
-
-2. **不要把 trial 的正结果当成抓取成功。**
-   - trial 只适合筛 offset。
-   - 是否真正抓起，只看 full episode。
-
-3. **不要默认本地读到的 Genesis API 就等于远端容器可用 API。**
-   - 任何依赖新参数的方案，先做 runtime capability check。
-
-4. **不要只拷贝 MJCF 主文件。**
-   - 如果官方 XML 里有 `meshdir="assets"`，就必须维护完整资产目录结构。
-
-5. **不要默认“夹得更紧”一定更好。**
-   - E24 表明增大 `gripper_close` 可能破坏接触几何，导致 episode 结果反而下降。
-
-6. **调参顺序要固定。**
-   - 先 `approach_z`
-   - 再 `offset_z`
-   - 再 `offset_x / offset_y`
-   - 再 `close_hold_steps`
-   - 最后才是更大的 `gripper_close`、PD gains 或接触参数
-7. **截图复盘也很重要。**
-   - 像 `E23` 这样已经能接触 box 的 case，单看 `delta_z` 不够。
-   - 如果从 side view 看见 box 没有进入两爪中间，而是更靠近单侧 jaw，
-   - 那下一步通常应优先检查 `offset_y`，再看是否需要微调 `offset_x`。
-8. **图像判断要用实验再验证。**
-   - `E23` 截图给出的“先调 `offset_y`”判断，在 `E25` 的 grid search 里得到了支持：
-   - 最优候选从 `offset_y=0.0` 移到了 `offset_y=+0.015`
-   - 这说明视觉复盘不是凭感觉拍脑袋，而是可以转成下一轮可验证的参数方向。
-9. **但 `offset_x / offset_y` 的最优值会随 cube 位姿变化。**
-   - `E25` 给出的最优点是 `[0.01, 0.015, -0.008]`
-   - `E26` 给出的最优点是 `[0.005, 0.01, -0.008]`
-   - 两轮都指向 `y+`
-   - 但绝对数值并不完全一致，说明这里更像是“正确方向已经明确，具体最佳值仍要按位姿微调”。
-10. **`offset_y` 的方向判断也要结合当前位姿，不要把单次截图绝对化。**
-   - `E25/E26` 确实支持了“往 `y+` 居中”
-   - 但 `E27` 在另一组 cube 位姿下并没有继续提升
-   - 说明截图适合给出“下一轮优先怀疑谁”，但不适合直接推出对所有位姿都成立的固定偏移。
-11. **更长 hold 仍然是可继续保留的方向，但收益有限。**
-   - `E28` 把 `close_hold_steps` 提到 `70` 后，episode 仍有 `+0.0010m`
-   - 这说明“先捏稳再提”这个思路没有错
-   - 但仅靠增加 hold 还不足以超过 `E23`
-   - 当前更像是需要：
-     - 合适的 `x/y/z` 几何
-     - 加上足够但不过强的 hold
 
 ### 9.4 当前建议
 
-如果继续实验，建议只沿下面这条线推进：
+固定 gripper_close=-20 或另一个已经确认“确实在闭合”的值
+固定 approach_z=0.012
+固定 offset_z=-0.010
+回到固定 pose 的中心附近 x/y 小范围扫描
+不要再让 auto-tune 只看 delta_z,要把“是否真的进入两爪中间”作为第一筛选条件 **哪个 x/y 让 box 在 close 开始前就处在两爪之间**
 
-1. 固定 `grasp_center`
-2. 暂时固定 `gripper_close=45`（作为当前实验基线，不代表最终最优）
-3. 保持 `approach_z=0.012`、`close_hold_steps=50`
-4. `offset_y` 可以优先从小幅正值开始试（约 `+0.01 ~ +0.015`），但不要把它当成固定真值
-5. `offset_x` 维持在小幅正值（约 `+0.005 ~ +0.01`）并按位姿微调
-6. `offset_z` 继续围绕 `-0.008` 附近微调
-7. `close_hold_steps` 可以保留在 `50~70` 之间试，但不要指望它单独解决问题
 
----
 
-## 10) 一句话流程
 
-用 MJCF 官方模型 + gripper-down IK，先降 `approach_z` 保证指尖到方块侧面，再用 `offset → close → hold` 三步法 grid search 迭代，以 `cube_lift_delta > 0.01m` 作为统一验收标准。
+
+
+
+
+
 
 ---
