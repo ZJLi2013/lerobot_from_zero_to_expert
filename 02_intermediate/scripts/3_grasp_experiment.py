@@ -161,6 +161,12 @@ def main():
                         help="Minimum sampled cube center y in world frame (m)")
     parser.add_argument("--cube-y-max", type=float, default=0.05,
                         help="Maximum sampled cube center y in world frame (m)")
+    parser.add_argument("--cube-fixed-x", type=float, default=None,
+                        help="If set, fix cube center x to this world-frame value (m)")
+    parser.add_argument("--cube-fixed-y", type=float, default=None,
+                        help="If set, fix cube center y to this world-frame value (m)")
+    parser.add_argument("--cube-fixed-z", type=float, default=0.015,
+                        help="Cube center z to use when a fixed cube pose is requested (m)")
     args = parser.parse_args()
 
     # ── [1] Locate MJCF ──────────────────────────────────────────────────────
@@ -216,6 +222,8 @@ def main():
     print("  camera[side]           = pos=(0.5, -0.4, 0.3), lookat=(0.15, 0.0, 0.1), fov=45")
     print(f"  cube sampling range    = x[{args.cube_x_min:.3f}, {args.cube_x_max:.3f}], "
           f"y[{args.cube_y_min:.3f}, {args.cube_y_max:.3f}]")
+    if args.cube_fixed_x is not None and args.cube_fixed_y is not None:
+        print(f"  cube fixed pose        = [{args.cube_fixed_x:.4f}, {args.cube_fixed_y:.4f}, {args.cube_fixed_z:.4f}]")
 
     # ── [3] Joints + EE + PD + Home ──────────────────────────────────────────
     stage("3/6  Joints + PD + Home")
@@ -598,12 +606,19 @@ def main():
         for _ in range(50):
             scene.step()
 
-        # Randomize cube
-        cube_pos = np.array([
-            np.random.uniform(args.cube_x_min, args.cube_x_max),
-            np.random.uniform(args.cube_y_min, args.cube_y_max),
-            0.015,
-        ])
+        # Randomize cube unless a fixed debug pose is requested.
+        if args.cube_fixed_x is not None and args.cube_fixed_y is not None:
+            cube_pos = np.array([
+                args.cube_fixed_x,
+                args.cube_fixed_y,
+                args.cube_fixed_z,
+            ])
+        else:
+            cube_pos = np.array([
+                np.random.uniform(args.cube_x_min, args.cube_x_max),
+                np.random.uniform(args.cube_y_min, args.cube_y_max),
+                0.015,
+            ])
         cube.set_pos(torch.tensor(cube_pos, dtype=torch.float32, device=gs.device).unsqueeze(0))
         for _ in range(15):
             scene.step()
