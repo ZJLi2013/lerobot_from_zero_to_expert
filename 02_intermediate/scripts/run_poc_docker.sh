@@ -38,8 +38,8 @@ export DISPLAY=:99
 sleep 2
 echo "Xvfb PID=${XVFB_PID}, DISPLAY=${DISPLAY}"
 
-echo "=== [run 2/2] poc_genesis_pipeline.py ==="
+echo "=== [run 2/2] genesis_quick_start.py ==="
 cd "${SCRIPT_DIR}"
-python poc_genesis_pipeline.py --frames 10 --save /tmp/poc_output
+python genesis_quick_start.py --frames 10 --save /tmp/poc_output
 
 kill "${XVFB_PID}" 2>/dev/null || true

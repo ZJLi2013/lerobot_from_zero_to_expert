@@ -9,9 +9,9 @@ SDG SO-101 改进版 — 修复朝向 / 自动探测 IK / .rrd 输出
   5. 内置 .rrd 输出（probe 诊断 + episode 数据）
 
 用法：
-  python sdg_so101_improved.py                           # 1 episode, 默认参数
-  python sdg_so101_improved.py --euler 180 0 0           # 尝试 X 轴翻转
-  python sdg_so101_improved.py --episodes 3 --save /out  # 多 episode
+  python 3_improved_collect.py                           # 1 episode, 默认参数
+  python 3_improved_collect.py --euler 180 0 0           # 尝试 X 轴翻转
+  python 3_improved_collect.py --episodes 3 --save /out  # 多 episode
 """
 import argparse
 import os

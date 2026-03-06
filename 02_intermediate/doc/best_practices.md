@@ -2,11 +2,6 @@
 
 > 面向可复用的合成数据流程：稳定朝向、可达抓取、可解释调参、可量化验收。
 
-关联文档：
-- 入口导航：`readme.md`
-- 实现流程：`genesis_sdg.md`
-
----
 
 ## 1) 推荐基线配置
 
@@ -89,7 +84,7 @@
 
 ## 4) 自动化调参建议
 
-`sdg_so101_grasp_experiment.py` 已支持 offset 网格搜索：
+`4_grasp_experiment.py` 已支持 offset 网格搜索：
 
 - `--auto-tune-offset`
 - `--offset-x-candidates=...`
@@ -178,7 +173,7 @@
 
 ```powershell
 cd "c:\Users\zhengjli\Documents\github\lerobot_from_zero_to_expert"
-git add "02_intermediate/best_practices.md" "02_intermediate/scripts/sdg_so101_grasp_experiment.py"
+git add "02_intermediate/best_practices.md" "02_intermediate/scripts/4_grasp_experiment.py"
 git commit -m "update grasp best practices and tuning script"
 git push origin main
 ```
@@ -196,7 +191,7 @@ ssh david@<4090_HOST> "mkdir -p ~/sdg_grasp_exp && docker run --rm --gpus all \
   -v ~/github/lerobot_from_zero_to_expert:/workspace/lfzte \
   -v ~/sdg_grasp_exp:/output \
   genesis_poc:latest \
-  python -u /workspace/lfzte/02_intermediate/scripts/sdg_so101_grasp_experiment.py \
+  python -u /workspace/lfzte/02_intermediate/scripts/4_grasp_experiment.py \
   --exp-id E3_auto_offset \
   --episodes 1 \
   --episode-length 6 \

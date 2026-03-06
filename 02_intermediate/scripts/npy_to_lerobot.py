@@ -1,5 +1,5 @@
 """
-将 sdg_so101_genesis.py 输出的 npy 文件转为 LeRobot v3 数据集格式。
+将 2_basic_collect.py 输出的 npy 文件转为 LeRobot v3 数据集格式。
 
 输出结构（与 svla_so101_pickplace 同构）：
   <output>/
@@ -34,7 +34,7 @@ except ImportError:
 
 def parse_args():
     p = argparse.ArgumentParser(description="npy → LeRobot dataset converter")
-    p.add_argument("--input",  required=True, help="sdg_so101_genesis.py 输出目录")
+    p.add_argument("--input",  required=True, help="2_basic_collect.py 输出目录")
     p.add_argument("--output", required=True, help="LeRobot 数据集输出目录")
     p.add_argument("--fps",    type=int, default=30)
     p.add_argument("--task",   default="pick up the red cube and place it to the right")

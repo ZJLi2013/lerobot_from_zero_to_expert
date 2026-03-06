@@ -97,7 +97,7 @@ fi
 echo ""
 echo "============================================================"
 echo "  设置完成，可以运行 POC："
-echo "  python poc_genesis_pipeline.py"
+echo "  python genesis_quick_start.py"
 echo ""
 echo "  注意：headless 服务器会自动启动 Xvfb，也可手动："
 echo "  Xvfb :99 -screen 0 1280x1024x24 -ac &"

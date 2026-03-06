@@ -15,9 +15,9 @@ svla_so101_pickplace 数据结构采集 (state, action, image_up, image_side)。
   [7] 保存数据（npy）+ 统计摘要
 
 用法：
-  python sdg_so101_genesis.py                          # 默认 3 episodes
-  python sdg_so101_genesis.py --episodes 10 --fps 30   # 自定义
-  python sdg_so101_genesis.py --no-download             # 跳过 URDF 下载
+  python 2_basic_collect.py                          # 默认 3 episodes
+  python 2_basic_collect.py --episodes 10 --fps 30   # 自定义
+  python 2_basic_collect.py --no-download             # 跳过 URDF 下载
 """
 
 import argparse
