@@ -249,8 +249,9 @@ def main():
     ik_supports_local_point = "local_point" in inspect.signature(so101.inverse_kinematics).parameters
     print(f"  IK supports local_point = {ik_supports_local_point}")
 
+    gripper_ref = None
     tcp_local_point = None
-    tcp_world_offset = None
+    tcp_half_span_world = None
     if ee_name == "moving_jaw_so101_v1":
         try:
             gripper_ref = so101.get_link("gripper")
@@ -258,9 +259,9 @@ def main():
             jaw_quat = to_numpy(ee_link.get_quat())
             grip_pos = to_numpy(gripper_ref.get_pos())
             tcp_world = 0.5 * (jaw_pos + grip_pos)
-            tcp_world_offset = tcp_world - jaw_pos
+            tcp_half_span_world = 0.5 * (grip_pos - jaw_pos)
             if ik_supports_local_point:
-                tcp_local_point = gu.inv_transform_by_quat(tcp_world_offset, jaw_quat)
+                tcp_local_point = gu.inv_transform_by_quat(tcp_world - jaw_pos, jaw_quat)
                 print(
                     "  TCP proxy (jaw<->gripper midpoint): "
                     f"world=[{tcp_world[0]:.4f}, {tcp_world[1]:.4f}, {tcp_world[2]:.4f}], "
@@ -268,9 +269,9 @@ def main():
                 )
             else:
                 print(
-                    "  TCP proxy (jaw<->gripper midpoint): "
+                    "  Dual-link proxy (jaw/gripper midpoint): "
                     f"world=[{tcp_world[0]:.4f}, {tcp_world[1]:.4f}, {tcp_world[2]:.4f}], "
-                    f"world_offset=[{tcp_world_offset[0]:.4f}, {tcp_world_offset[1]:.4f}, {tcp_world_offset[2]:.4f}]"
+                    f"half_span=[{tcp_half_span_world[0]:.4f}, {tcp_half_span_world[1]:.4f}, {tcp_half_span_world[2]:.4f}]"
                 )
         except Exception as e:
             print(f"  TCP proxy unavailable: {e}")
@@ -278,18 +279,34 @@ def main():
     # IK sanity check — verify the solution actually reaches the target
     try:
         ik_target = np.array([0.15, 0.0, 0.08])
-        ik_target_link = ik_target if tcp_world_offset is None or ik_supports_local_point else (ik_target - tcp_world_offset)
-        ik_kwargs = dict(
-            link=ee_link,
-            pos=ik_target_link,
-            quat=None,
-            init_qpos=home_rad,
-            max_solver_iters=50,
-            damping=0.02,
-        )
         if ik_supports_local_point and tcp_local_point is not None:
-            ik_kwargs["local_point"] = tcp_local_point
-        q_test = so101.inverse_kinematics(**ik_kwargs)
+            q_test = so101.inverse_kinematics(
+                link=ee_link,
+                pos=ik_target,
+                quat=None,
+                local_point=tcp_local_point,
+                init_qpos=home_rad,
+                max_solver_iters=50,
+                damping=0.02,
+            )
+        elif gripper_ref is not None and tcp_half_span_world is not None:
+            q_test = so101.inverse_kinematics_multilink(
+                links=[ee_link, gripper_ref],
+                poss=[ik_target - tcp_half_span_world, ik_target + tcp_half_span_world],
+                quats=None,
+                init_qpos=home_rad,
+                max_solver_iters=50,
+                damping=0.02,
+            )
+        else:
+            q_test = so101.inverse_kinematics(
+                link=ee_link,
+                pos=ik_target,
+                quat=None,
+                init_qpos=home_rad,
+                max_solver_iters=50,
+                damping=0.02,
+            )
         q_test_np = to_numpy(q_test) if hasattr(q_test, 'cpu') else np.array(q_test)
         so101.set_qpos(q_test_np)
         so101.control_dofs_position(q_test_np, dof_idx)
@@ -297,10 +314,11 @@ def main():
             scene.step()
         ee_pos_check = to_numpy(ee_link.get_pos())
         ee_quat_check = to_numpy(ee_link.get_quat())
+        grip_pos_check = to_numpy(gripper_ref.get_pos()) if gripper_ref is not None else None
         if ik_supports_local_point and tcp_local_point is not None:
             tcp_check = ee_pos_check + gu.transform_by_quat(tcp_local_point, ee_quat_check)
-        elif tcp_world_offset is not None:
-            tcp_check = ee_pos_check + tcp_world_offset
+        elif grip_pos_check is not None:
+            tcp_check = 0.5 * (ee_pos_check + grip_pos_check)
         else:
             tcp_check = ee_pos_check
         ik_err = np.linalg.norm(tcp_check - ik_target)
@@ -355,17 +373,40 @@ def main():
 
     def solve_ik_seeded(pos, grip_deg, seed_rad=None):
         """Solve IK with explicit seed to ensure consistent solutions."""
-        q = to_numpy(
-            so101.inverse_kinematics(
-                link=ee_link,
-                pos=pos if tcp_world_offset is None or ik_supports_local_point else (pos - tcp_world_offset),
-                quat=None,
-                init_qpos=seed_rad,
-                max_solver_iters=50,
-                damping=0.02,
-                **({"local_point": tcp_local_point} if ik_supports_local_point and tcp_local_point is not None else {}),
+        if ik_supports_local_point and tcp_local_point is not None:
+            q = to_numpy(
+                so101.inverse_kinematics(
+                    link=ee_link,
+                    pos=pos,
+                    quat=None,
+                    local_point=tcp_local_point,
+                    init_qpos=seed_rad,
+                    max_solver_iters=50,
+                    damping=0.02,
+                )
             )
-        )
+        elif gripper_ref is not None and tcp_half_span_world is not None:
+            q = to_numpy(
+                so101.inverse_kinematics_multilink(
+                    links=[ee_link, gripper_ref],
+                    poss=[pos - tcp_half_span_world, pos + tcp_half_span_world],
+                    quats=None,
+                    init_qpos=seed_rad,
+                    max_solver_iters=50,
+                    damping=0.02,
+                )
+            )
+        else:
+            q = to_numpy(
+                so101.inverse_kinematics(
+                    link=ee_link,
+                    pos=pos,
+                    quat=None,
+                    init_qpos=seed_rad,
+                    max_solver_iters=50,
+                    damping=0.02,
+                )
+            )
         q_deg = np.rad2deg(q)
         if n_dofs >= 6:
             q_deg[5] = grip_deg
@@ -434,10 +475,11 @@ def main():
                 scene.step()
             ee_pos = to_numpy(ee_link.get_pos())
             ee_quat = to_numpy(ee_link.get_quat())
+            grip_pos = to_numpy(gripper_ref.get_pos()) if gripper_ref is not None else None
             if ik_supports_local_point and tcp_local_point is not None:
                 tcp_pos = ee_pos + gu.transform_by_quat(tcp_local_point, ee_quat)
-            elif tcp_world_offset is not None:
-                tcp_pos = ee_pos + tcp_world_offset
+            elif grip_pos is not None:
+                tcp_pos = 0.5 * (ee_pos + grip_pos)
             else:
                 tcp_pos = ee_pos
             print(f"    [diag] IK approach target: [{pos_approach[0]:.4f}, {pos_approach[1]:.4f}, {pos_approach[2]:.4f}]")
