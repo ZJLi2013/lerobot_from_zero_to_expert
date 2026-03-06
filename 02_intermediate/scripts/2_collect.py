@@ -325,6 +325,10 @@ for ep in range(args.episodes):
         print(f"  ⚠ episode {ep}: IK failed ({e}), skipping")
         continue
 
+    ps = steps_per_episode // 6
+    close_start_fi = 2 * ps
+    lift_end_fi = 4 * ps
+
     ep_data = {
         "observation.state": [],
         "action": [],
@@ -335,10 +339,18 @@ for ep in range(args.episodes):
         "episode_index": [],
     }
 
+    cube_z_before = None
+    cube_z_after = None
+
     for fi, target_deg in enumerate(trajectory):
         target_rad = np.deg2rad(np.array(target_deg, dtype=np.float32))
         so101.control_dofs_position(target_rad, ALL_DOF_IDX)
         scene.step()
+
+        if fi == close_start_fi:
+            cube_z_before = float(to_numpy(cube.get_pos())[2])
+        if fi == lift_end_fi:
+            cube_z_after = float(to_numpy(cube.get_pos())[2])
 
         state_deg = np.rad2deg(to_numpy(so101.get_dofs_position(ALL_DOF_IDX)))
         ep_data["observation.state"].append(state_deg.astype(np.float32))
@@ -349,10 +361,21 @@ for ep in range(args.episodes):
         ep_data["frame_index"].append(fi)
         ep_data["episode_index"].append(ep)
 
+    if cube_z_before is None:
+        cube_z_before = float(to_numpy(cube.get_pos())[2])
+    if cube_z_after is None:
+        cube_z_after = float(to_numpy(cube.get_pos())[2])
+    lift_delta = cube_z_after - cube_z_before
+    grasp_ok = lift_delta > 0.01
+
     all_episodes.append(ep_data)
     n_frames = len(trajectory)
     elapsed = time.time() - ep_t0
-    print(f"  episode {ep}: {n_frames} frames, {elapsed:.1f}s ({n_frames/elapsed:.0f} sim-fps)")
+    print(
+        f"  episode {ep}: {n_frames} frames, {elapsed:.1f}s ({n_frames/elapsed:.0f} sim-fps) | "
+        f"grasp={'✓' if grasp_ok else '✗'} delta_z={lift_delta:.4f}m "
+        f"(before={cube_z_before:.4f}, after={cube_z_after:.4f})"
+    )
 
 if not all_episodes:
     print("  ✗ No episodes collected")
