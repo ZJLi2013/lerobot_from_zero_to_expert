@@ -262,7 +262,28 @@ def main():
     def lerp(a, b, n):
         return [a + (b - a) * (i + 1) / max(n, 1) for i in range(n)]
 
-    def build_key_poses(cube_pos, offset_x, offset_y, offset_z):
+    def cartesian_descent(cube_pos, off, z_from, z_to, grip_deg, n_waypoints=5):
+        """Solve IK at multiple intermediate heights for straight-line descent."""
+        waypoints = []
+        for i in range(n_waypoints):
+            frac = (i + 1) / n_waypoints
+            z = z_from + (z_to - z_from) * frac
+            pos = cube_pos + off + np.array([0.0, 0.0, z])
+            waypoints.append(solve_ik(pos, grip_deg))
+        return waypoints
+
+    def reset_scene(cube_pos, settle_steps=30):
+        """Full reset: position + velocity for robot and cube."""
+        so101.set_qpos(home_rad)
+        so101.control_dofs_position(home_rad, dof_idx)
+        so101.set_dofs_velocity(np.zeros(n_dofs, dtype=np.float32), dof_idx)
+        cube.set_pos(torch.tensor(cube_pos, dtype=torch.float32, device=gs.device).unsqueeze(0))
+        cube.set_quat(torch.tensor([1, 0, 0, 0], dtype=torch.float32, device=gs.device).unsqueeze(0))
+        for _ in range(settle_steps):
+            scene.step()
+
+    def build_trajectory(cube_pos, offset_x, offset_y, offset_z, total_steps):
+        """Build trajectory with Cartesian-space descent to avoid lateral swing."""
         off = np.array([offset_x, offset_y, offset_z])
         q_pre = solve_ik(cube_pos + off + np.array([0.0, 0.0, 0.10]), args.gripper_open)
         q_approach = solve_ik(
@@ -272,32 +293,60 @@ def main():
         if n_dofs >= 6:
             q_close[5] = args.gripper_close
         q_lift = solve_ik(cube_pos + off + np.array([0.0, 0.0, 0.15]), args.gripper_close)
-        return home_deg.copy(), q_pre, q_approach, q_close, q_lift
 
-    def run_trial(cube_pos, offset_x, offset_y, offset_z):
-        """Quick trial: reset → approach → close → lift → measure delta_z."""
-        so101.set_qpos(home_rad)
-        so101.control_dofs_position(home_rad, dof_idx)
-        cube.set_pos(torch.tensor(cube_pos, dtype=torch.float32, device=gs.device).unsqueeze(0))
-        for _ in range(20):
-            scene.step()
-
-        q_home_t, q_pre_t, q_approach_t, q_close_t, q_lift_t = build_key_poses(
-            cube_pos, offset_x, offset_y, offset_z
+        descent_wps = cartesian_descent(
+            cube_pos, off, 0.10, args.approach_z, args.gripper_open, n_waypoints=6
         )
 
-        trial_traj = []
-        trial_phases = []
-        trial_traj += lerp(q_home_t, q_pre_t, 15);     trial_phases += ["move_pre"] * 15
-        trial_traj += lerp(q_pre_t, q_approach_t, 15);  trial_phases += ["approach"] * 15
-        trial_traj += lerp(q_approach_t, q_close_t, 10); trial_phases += ["close"] * 10
-        trial_traj += [q_close_t.copy() for _ in range(args.close_hold_steps)]
-        trial_phases += ["close_hold"] * args.close_hold_steps
-        trial_traj += lerp(q_close_t, q_lift_t, 20);    trial_phases += ["lift"] * 20
+        traj = []
+        phases = []
+
+        n_move = max(15, total_steps // 8)
+        traj += lerp(home_deg.copy(), q_pre, n_move)
+        phases += ["move_pre"] * n_move
+
+        steps_per_wp = max(3, total_steps // (8 * len(descent_wps)))
+        prev = q_pre
+        for wp in descent_wps:
+            traj += lerp(prev, wp, steps_per_wp)
+            phases += ["approach"] * steps_per_wp
+            prev = wp
+
+        n_close = max(8, total_steps // 12)
+        traj += lerp(q_approach, q_close, n_close)
+        phases += ["close"] * n_close
+
+        n_hold = args.close_hold_steps
+        traj += [q_close.copy() for _ in range(n_hold)]
+        phases += ["close_hold"] * n_hold
+
+        lift_wps = cartesian_descent(
+            cube_pos, off, args.approach_z, 0.15, args.gripper_close, n_waypoints=4
+        )
+        steps_per_lift = max(5, total_steps // (8 * len(lift_wps)))
+        prev = q_close
+        for wp in lift_wps:
+            traj += lerp(prev, wp, steps_per_lift)
+            phases += ["lift"] * steps_per_lift
+            prev = wp
+
+        consumed = len(traj)
+        n_return = max(0, total_steps - consumed)
+        if n_return > 0:
+            traj += lerp(q_lift, home_deg.copy(), n_return)
+            phases += ["return"] * n_return
+
+        return traj, phases
+
+    def run_trial(cube_pos, offset_x, offset_y, offset_z):
+        """Quick trial: reset → Cartesian descent → close → lift → measure delta_z."""
+        reset_scene(cube_pos, settle_steps=20)
+
+        traj, phases = build_trajectory(cube_pos, offset_x, offset_y, offset_z, total_steps=90)
 
         z_before = None
         z_after = None
-        for target_deg, phase in zip(trial_traj, trial_phases):
+        for target_deg, phase in zip(traj, phases):
             target_rad_t = np.deg2rad(np.array(target_deg, dtype=np.float32))
             so101.control_dofs_position(target_rad_t, dof_idx)
             scene.step()
@@ -403,32 +452,12 @@ def main():
         # ── [5] Full episode collection with chosen offset ────────────────────
         stage(f"5/6  数据采集 ep {ep}")
 
-        so101.set_qpos(home_rad)
-        so101.control_dofs_position(home_rad, dof_idx)
-        cube.set_pos(torch.tensor(cube_pos, dtype=torch.float32, device=gs.device).unsqueeze(0))
-        for _ in range(30):
-            scene.step()
+        reset_scene(cube_pos, settle_steps=30)
 
-        q_home_f, q_pre_f, q_approach_f, q_close_f, q_lift_f = build_key_poses(
-            cube_pos, chosen_offset[0], chosen_offset[1], chosen_offset[2]
+        trajectory, labels = build_trajectory(
+            cube_pos, chosen_offset[0], chosen_offset[1], chosen_offset[2],
+            total_steps=steps_per_episode,
         )
-
-        n1 = max(20, steps_per_episode // 8)
-        n2 = max(20, steps_per_episode // 8)
-        n3 = max(10, steps_per_episode // 12)
-        n4 = args.close_hold_steps
-        n5 = max(25, steps_per_episode // 8)
-        consumed = n1 + n2 + n3 + n4 + n5
-        n6 = max(0, steps_per_episode - consumed)
-
-        trajectory = []
-        labels = []
-        trajectory += lerp(q_home_f, q_pre_f, n1);       labels += ["move_pre"] * n1
-        trajectory += lerp(q_pre_f, q_approach_f, n2);    labels += ["approach"] * n2
-        trajectory += lerp(q_approach_f, q_close_f, n3);  labels += ["close"] * n3
-        trajectory += [q_close_f.copy() for _ in range(n4)]; labels += ["close_hold"] * n4
-        trajectory += lerp(q_close_f, q_lift_f, n5);      labels += ["lift"] * n5
-        trajectory += lerp(q_lift_f, q_home_f, n6);       labels += ["return"] * n6
 
         ep_data = {
             "observation.state": [],
