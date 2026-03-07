@@ -72,9 +72,9 @@
                 <geom type="mesh" class="collision" pos="0.0077 0.0001 -0.0234" quat="0.707107 -0.707107 1.66015e-15 6.45094e-15" mesh="sts3215_03a_v1" material="sts3215_03a_v1_material"/>
                 <geom type="mesh" class="visual" pos="8.32667e-17 -0.000218214 0.000949706" quat="0 1 0 0" mesh="wrist_roll_follower_so101_v1" material="wrist_roll_follower_so101_v1_material"/>
                 <geom type="mesh" class="collision" pos="8.32667e-17 -0.000218214 0.000949706" quat="0 1 0 0" mesh="wrist_roll_follower_so101_v1" material="wrist_roll_follower_so101_v1_material"/>
-                <!-- fixed jaw: box collision for inner pinch surface -->
-                <geom name="fixed_jaw_box" type="box" size="0.003 0.015 0.002"
-                      pos="-0.005 0.005 -0.075" class="collision"
+                <!-- fixed jaw: box collision for inner pinch surface (gripper body local coords) -->
+                <geom name="fixed_jaw_box" type="box" size="0.002 0.015 0.020"
+                      pos="-0.002 0.005 -0.085" class="collision"
                       contype="1" conaffinity="1" friction="1.0 0.005 0.0001"/>
                 <site group="3" name="gripperframe" pos="0.0093419865 -0.0065437835 -0.0941650894" quat="0.707107 -0 0.707107 -2.37788e-17"/>
                 <body name="grasp_center" pos="0.0093419865 -0.0065437835 -0.0941650894" quat="0.707107 -0 0.707107 -2.37788e-17">
@@ -84,9 +84,9 @@
                   <joint axis="0 0 1" name="gripper" type="hinge" range="-0.17453297762778586 1.7453291995659765" class="sts3215"/>
                   <inertial pos="-0.00157495 -0.0300244 0.0192755" mass="0.012" fullinertia="6.61427e-06 1.89032e-06 5.28738e-06 -3.19807e-07 -5.90717e-09 -1.09945e-07"/>
                   <geom type="mesh" class="visual" pos="-5.55112e-17 -5.55112e-17 0.0189" quat="1 -0 3.00524e-16 -2.00834e-17" mesh="moving_jaw_so101_v1" material="moving_jaw_so101_v1_material"/>
-                  <!-- moving jaw: replace raw mesh collision with box primitive -->
-                  <geom name="moving_jaw_box" type="box" size="0.003 0.015 0.002"
-                        pos="0.0 -0.025 0.019" class="collision"
+                  <!-- moving jaw: box collision aligned to inner pinch surface (mesh analysis) -->
+                  <geom name="moving_jaw_box" type="box" size="0.002 0.015 0.020"
+                        pos="-0.010 -0.055 0.019" class="collision"
                         contype="1" conaffinity="1" friction="1.0 0.005 0.0001"/>
                 </body>
               </body>

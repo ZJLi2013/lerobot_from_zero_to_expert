@@ -245,12 +245,24 @@ def main():
         action="store_true",
         help="Only export close debug PNGs; skip npy, rrd, and metrics.json outputs",
     )
-    parser.add_argument("--settle-steps", type=int, default=30,
-                        help="Physics steps to settle after reset_scene before episode")
-    parser.add_argument("--sim-dt", type=float, default=None,
-                        help="Override sim dt (default: 1/fps). Use 0.002 for stable grasping.")
-    parser.add_argument("--cube-friction", type=float, default=None,
-                        help="Cube surface friction (default: Genesis default ~0.5). Try 1.0-2.0 for grasping.")
+    parser.add_argument(
+        "--settle-steps",
+        type=int,
+        default=30,
+        help="Physics steps to settle after reset_scene before episode",
+    )
+    parser.add_argument(
+        "--sim-dt",
+        type=float,
+        default=None,
+        help="Override sim dt (default: 1/fps). Use 0.002 for stable grasping.",
+    )
+    parser.add_argument(
+        "--cube-friction",
+        type=float,
+        default=None,
+        help="Cube surface friction (default: Genesis default ~0.5). Try 1.0-2.0 for grasping.",
+    )
     parser.add_argument("--sim-substeps", type=int, default=4)
     parser.add_argument("--solver-iterations", type=int, default=50)
     parser.add_argument("--solver-tolerance", type=float, default=1e-6)
@@ -292,7 +304,7 @@ def main():
         "Euler": gs.integrator.Euler,
     }
 
-    rigid_kw = dict(enable_collision=True, enable_joint_limit=True)
+    rigid_kw = dict(enable_collision=True, enable_joint_limit=True, box_box_detection=True)
     if args.integrator != "approximate_implicitfast":
         rigid_kw["integrator"] = integrator_map[args.integrator]
     if args.solver_iterations != 50:
@@ -312,23 +324,21 @@ def main():
 
     sim_dt = args.sim_dt if args.sim_dt is not None else 1.0 / args.fps
     scene = gs.Scene(
-        sim_options=gs.options.SimOptions(
-            dt=sim_dt, substeps=args.sim_substeps
-        ),
+        sim_options=gs.options.SimOptions(dt=sim_dt, substeps=args.sim_substeps),
         rigid_options=gs.options.RigidOptions(**rigid_kw),
         show_viewer=False,
     )
     print(f"  sim dt={sim_dt:.4f}, substeps={args.sim_substeps}")
     scene.add_entity(gs.morphs.Plane())
 
-    cube_surface_kw = dict(color=(1.0, 0.3, 0.3, 1.0))
-    if args.cube_friction is not None:
-        cube_surface_kw["friction"] = args.cube_friction
-        print(f"  cube friction={args.cube_friction}")
-    cube = scene.add_entity(
-        gs.morphs.Box(size=(0.03, 0.03, 0.03), pos=(0.15, 0.0, 0.015)),
-        surface=gs.surfaces.Default(**cube_surface_kw),
+    cube_entity_kw = dict(
+        morph=gs.morphs.Box(size=(0.03, 0.03, 0.03), pos=(0.15, 0.0, 0.015)),
+        surface=gs.surfaces.Default(color=(1.0, 0.3, 0.3, 1.0)),
     )
+    if args.cube_friction is not None:
+        cube_entity_kw["material"] = gs.materials.Rigid(friction=args.cube_friction)
+        print(f"  cube friction={args.cube_friction} (gs.materials.Rigid)")
+    cube = scene.add_entity(**cube_entity_kw)
     so101 = scene.add_entity(gs.morphs.MJCF(file=str(xml_path), pos=(0.0, 0.0, 0.0)))
     print(f"  ✓ SO-101 loaded via MJCF")
 
