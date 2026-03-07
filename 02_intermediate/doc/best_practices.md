@@ -2,9 +2,10 @@
 
 > 面向可复用的合成数据流程：稳定朝向、可达抓取、可解释调参、可量化验收。
 
-EE = End Effector（末端执行器）, 就是机械臂最末端、真正和外界接触的那个部件. 对 SO-101 来说，就是夹爪
-TCP = Tool Center Point（工具中心点）,是 EE 上的一个具体的参考点, 这里就是 **grasp_center**
-通俗说，EE 是"手"，TCP 是"手上真正要对准东西的那个点"
+EE = End Effector（末端执行器），TCP = Tool Center Point（工具中心点），Jaw pinch center = 夹持中心点。
+完整术语表和概念关系图见 [grasp_explain.md](grasp_explain.md) 第 1 节。
+
+
 
 ---
 
@@ -225,52 +226,70 @@ auto_tune.best_offset, auto_tune.best_lift_delta, auto_tune.search_log
 | E38-E41 | 固定 `E33` 的 pose/几何后，测试 `gripper_close=-20,-10,0` | 三者 episode 都约 `+0.0006m`；gripper_close 方向问题已经从"未知"变成"已知"，但抓取失败的主因仍然是 TCP 目标点没有把 box 放进 pinch 区域。|
 | E42-M1 | **XY 对齐问题确认**（见 9.4）：jaw 尖端可达 cube 高度，但 grasp_center XY 偏移导致 cube 在 jaw 外缘空抓；Z 方向可达（之前 body origin 测量误导） |
 
-### 9.4 当前阻塞与分析（E42–M1, 2026-03-06, 已修正）
+### 9.4 当前阻塞（E42–M1）
 
-#### 9.4.1 `grasp_center` 位置定义偏差
+#### A. 实验观察（事实）
 
-`so101_new_calib.xml` 中 `gripperframe` / `grasp_center` 的 `pos="-0.0079 -0.000218 -0.0981"` 把 TCP 放到了 **gripper body 下方约 8cm**。
+**观察 1：IK 精度没问题**
 
-诊断脚本 `diag_link_positions.py` 输出（IK 将 `grasp_center` 定位到 cube center `[0.16, 0, 0.015]`）：
+`grasp_center` 的 IK 求解精度为 0.0002m（0.2mm），可以精确到达指定目标位置。
 
-| link | world z | 与 cube center 差 |
+**观察 2：link body origin 与 jaw mesh tip 不是同一个东西**
+
+`diag_link_positions.py` 测量的是 link body origin（坐标系原点），不是 mesh 尖端：
+
+| link | world z (body origin) | 与 cube center 差 |
 |------|---------|-------------------|
 | grasp_center | 0.015 | 0（IK 精度 0.0002m） |
 | gripper (body origin) | 0.104 | +0.089 |
 | moving_jaw (body origin) | 0.090 | +0.075 |
 
-> **注意**：上表中 gripper / moving_jaw 的 z 是 **link body origin**，不是 jaw mesh 尖端。
-> 实际 jaw mesh 尖端远低于 body origin，**可以到达 cube 高度**。
+`diag_gc_sweep.py` 中的 `jaw_mid_z` 也是 body origin 中点，不是 mesh tip。
 
-#### 9.4.2 ~~工作空间不可达~~ → XY 平面对齐问题（已修正）
+**观察 3：jaw 尖端确实可以到达 cube 高度**
 
-> **之前结论"z 方向不可达"是错误的。** `diag_gc_sweep.py` 测量的 `jaw_mid_z`
-> 是 gripper 和 moving_jaw 的 **body origin 中点**，不是 jaw mesh tip 位置。
-> 实际 jaw mesh 尖端可以延伸到 z=0.015 附近，与 cube 同高。
+E41/E42/E44 的 close 阶段 debug PNGs 清楚显示：jaw mesh 尖端远低于 body origin，**实际可达 cube 所在的 z=0.015 高度**。
 
-回看 E41/E42/E44 的 close 阶段 debug PNGs，可以清楚看到：
+**观察 4：cube 一直在 jaw 外缘，不在两爪中间**
 
-1. **Z 高度没有问题** — jaw 尖端确实触碰到了 cube
-2. **XY 偏移是真正的根因** — cube 一直在 fixed jaw 的**外侧边缘**，没有进入两爪之间的 pinch 区域
-3. 夹爪在 cube 旁边"空抓"，close 时只是擦边推动 cube 而非包裹夹持
+回看 E41/E42/E44 close 阶段密集帧：
 
-典型帧示例（E42 f065_close）：
-- 左视图：fixed jaw 底端与 cube 侧面贴合，但 cube 在 jaw 外侧
-- 右视图：cube 在 jaw 尖端旁，未进入两爪间隙
+- E42 f059_approach → f065_close → f090_close_hold：jaw 尖端与 cube 同高，但 cube 在 fixed jaw **外侧边缘**
+- E41 f033_close → f055_close_hold：jaw 触碰 cube，但 cube 被推歪而非夹住
+- E44 f033_close → f050_close_hold：cube 被爪基座推倒
 
-#### 9.4.3 根因：`grasp_center` 的 XY 偏移未对准 jaw pinch center
+**每一帧都显示同一个现象：cube 在爪旁边，不在两爪之间。**
 
-`grasp_center` 在 gripper body 的 local frame 中 `pos=(-0.008, -0.0002, -0.098)`。
-由于 gripper body 本身有复杂的旋转（`quat="0.017 -0.017 0.707 0.707"`），
-这个 local offset 映射到 world frame 后，`grasp_center` 在 XY 平面上与 jaw pinch center 产生了偏移。
+**观察 5：`verbose=True` 扰乱了 full-episode 初始状态**
 
-当 IK 把 `grasp_center` 精确送到 cube center 时，jaw pinch center 在 XY 平面上偏离了 cube，
-导致 cube 落在 jaw 外缘而非中间。
+`build_trajectory_chained_ik(verbose=True)` 内部执行了 `scene.step()`，改变了 robot/cube 位姿。trial 每次从 `reset_scene()` 干净启动，但 full episode 继承了被扰乱的状态。已修复。
 
-#### 9.4.4 Trial / Full-Episode Gap 的真正原因
+**观察 6：trial 正向 Δz 不可复现**
 
-1. **`verbose=True` 诊断 bug**：`build_trajectory_chained_ik(verbose=True)` 内部执行 `scene.step()` 扰乱 robot/cube 状态；trial 每次从 `reset_scene()` 干净启动。已修复（episode 收集前加入 reset）。
-2. **Trial 正向 Δz 不可复现**：`7_minimal_grasp.py` 独立跑 10 次，结果 0/10 > 0.01m，mean Δz = +0.0006m。auto-tune 中偶发的 0.01m+ 来自连续 trial 间残留的仿真状态。
+`7_minimal_grasp.py` 对同一 offset 独立跑 10 次：0/10 > 0.01m，mean Δz = +0.0006m。auto-tune 中偶发的 0.01m+ 来自连续 trial 间残留的仿真状态累积。
+
+---
+
+#### B. 推理分析
+
+**B1. Z 方向可达**
+
+**B2. 根因是 `grasp_center` 在 MJCF 中的挂载位置没有对准夹持中心点**
+
+> 术语：**夹持中心点（jaw pinch center）** = fixed jaw 和 moving jaw 闭合时，两个指尖之间的中心接触点。
+
+因果链条：
+
+1. `grasp_center` body 挂载在 `gripper` body 下，local pos = `(-0.008, -0.0002, -0.098)`
+2. `gripper` body 自身有旋转 `quat=(0.017, -0.017, 0.707, 0.707)`（约 90° 绕 Z）
+3. 这个 local pos 经过 gripper 的旋转后，映射到 world frame → `grasp_center` 的世界坐标与**真正的夹持中心点**之间存在 XY 偏移
+4. IK 精确地把 `grasp_center` 送到了 cube center（err=0.2mm）
+5. 但**夹持中心点不等于 `grasp_center`**，而是在 XY 平面上偏离了 cube
+6. 结果：cube 在 jaw 外缘，close 时擦边推开而非包裹夹住
+
+简单说：**`grasp_center` 的定义位置歪了，不是 IK 的问题，也不是 Z 方向的问题。**
+如果把 `grasp_center` 的 local pos 修正到真实夹持中心点(jaw pinch center)的位置，IK 就能把两爪正确地送到 cube 两侧。
+
 
 #### 9.4.5 当前建议
 
@@ -280,7 +299,8 @@ auto_tune.best_offset, auto_tune.best_lift_delta, auto_tune.search_log
 
 1. **标定 grasp_center → jaw pinch center 的 XY 偏移量**：在仿真中固定 cube 位置，用 `offset_x / offset_y` 的精细网格搜索（步长 1-2mm）找到让 cube 正好落入两爪中间的补偿值。搜索范围建议 `ox ∈ [-0.03, 0.03]`, `oy ∈ [-0.03, 0.03]`
 2. **修正 MJCF 中 `grasp_center` 的 pos**：根据标定结果，将 `grasp_center` body 的 pos 从当前值调整到实际 jaw pinch center 对应的 local offset
-3. **增加"cube 是否在两爪之间"的自动检测**：在 auto-tune 中除了看 `delta_z`，还要检查 close 阶段 cube 的 XY 位置是否在 fixed_jaw 和 moving_jaw 之间
-4. **approach_z 保持 0.012 附近**：Z 方向已证明可达，不需要平台或极端 approach_z
 
 ---
+
+
+
