@@ -240,6 +240,24 @@ def main():
         default=4,
         help="Frames to include before/after the close-related phases in debug PNG export",
     )
+    parser.add_argument(
+        "--png-only",
+        action="store_true",
+        help="Only export close debug PNGs; skip npy, rrd, and metrics.json outputs",
+    )
+    parser.add_argument("--sim-substeps", type=int, default=4)
+    parser.add_argument("--solver-iterations", type=int, default=50)
+    parser.add_argument("--solver-tolerance", type=float, default=1e-6)
+    parser.add_argument("--solver-ls-iterations", type=int, default=50)
+    parser.add_argument("--solver-ls-tolerance", type=float, default=1e-2)
+    parser.add_argument("--noslip-iterations", type=int, default=0)
+    parser.add_argument("--constraint-timeconst", type=float, default=0.01)
+    parser.add_argument(
+        "--integrator",
+        choices=["approximate_implicitfast", "implicitfast", "Euler"],
+        default="approximate_implicitfast",
+    )
+    parser.add_argument("--use-gjk-collision", action="store_true")
     args = parser.parse_args()
 
     # ── [1] Locate MJCF ──────────────────────────────────────────────────────
@@ -262,10 +280,27 @@ def main():
     if torch.cuda.is_available():
         print(f"  GPU: {torch.cuda.get_device_name(0)}")
 
+    integrator_map = {
+        "approximate_implicitfast": gs.integrator.approximate_implicitfast,
+        "implicitfast": gs.integrator.implicitfast,
+        "Euler": gs.integrator.Euler,
+    }
+
     scene = gs.Scene(
-        sim_options=gs.options.SimOptions(dt=1.0 / args.fps, substeps=4),
+        sim_options=gs.options.SimOptions(
+            dt=1.0 / args.fps, substeps=args.sim_substeps
+        ),
         rigid_options=gs.options.RigidOptions(
-            enable_collision=True, enable_joint_limit=True
+            enable_collision=True,
+            enable_joint_limit=True,
+            integrator=integrator_map[args.integrator],
+            iterations=args.solver_iterations,
+            tolerance=args.solver_tolerance,
+            ls_iterations=args.solver_ls_iterations,
+            ls_tolerance=args.solver_ls_tolerance,
+            noslip_iterations=args.noslip_iterations,
+            constraint_timeconst=args.constraint_timeconst,
+            use_gjk_collision=args.use_gjk_collision,
         ),
         show_viewer=False,
     )
@@ -306,6 +341,12 @@ def main():
     print(
         f"  cube sampling range    = x[{args.cube_x_min:.3f}, {args.cube_x_max:.3f}], "
         f"y[{args.cube_y_min:.3f}, {args.cube_y_max:.3f}]"
+    )
+    print(
+        "  rigid solver          = "
+        f"integrator={args.integrator}, substeps={args.sim_substeps}, "
+        f"iterations={args.solver_iterations}, noslip={args.noslip_iterations}, "
+        f"timeconst={args.constraint_timeconst:.4f}, gjk={args.use_gjk_collision}"
     )
     if args.cube_fixed_x is not None and args.cube_fixed_y is not None:
         print(
@@ -925,6 +966,24 @@ def main():
         )
 
     # ── [6] Save ──────────────────────────────────────────────────────────────
+    if args.png_only:
+        stage("6/6  保存（PNG only）")
+        print("  skipping npy / rrd / metrics.json")
+        print(f"\n{'═'*60}")
+        print(f"  SUMMARY — {args.exp_id}")
+        print(f"{'═'*60}")
+        total_success = sum(1 for e in metrics["episodes"] if e["grasp_success"])
+        total_eps = len(metrics["episodes"])
+        print(f"  Grasp success: {total_success}/{total_eps}")
+        if metrics.get("auto_tune", {}).get("enabled"):
+            best = metrics["auto_tune"]
+            print(
+                f"  Best offset: {best['best_offset']}, Δz={best['best_lift_delta']:.4f}m"
+            )
+        print(f"  PNG output: {out_dir / 'close_debug_pngs'}")
+        print(f"{'═'*60}\n")
+        return
+
     stage("6/6  保存")
     import rerun as rr
 
