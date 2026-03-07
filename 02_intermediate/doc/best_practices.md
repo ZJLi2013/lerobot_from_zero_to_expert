@@ -391,22 +391,6 @@ python -u 3_grasp_experiment.py \
 
 ---
 
-## 10. 穿透问题的物理仿真因素
-
-
-后续如果要继续研究穿透，建议顺序是：
-
-3. 先改 jaw/cube 的 collision geom，使接触面更规则
-4. 再给 jaw/cube 显式加 `friction`、`solref`、`solimp`
-5. 最后再做 Genesis solver 侧对照：
-   - 增大 `substeps`
-   - 打开 `noslip_iterations`
-   - 显式切到 `implicitfast`
-   - 诊断性地试 `use_gjk_collision=True`
-
-简单说，当前问题已经从"动作学没调好"切换成了"接触建模还不够可信"。
-
----
 
 ## 11. `3_grasp_experiment.py` 执行流程：trial vs full episode
 
@@ -462,27 +446,16 @@ for each episode:
 - 不能用"开了 auto-tune 的实验"和"没开 auto-tune 的实验"直接对比 dense PNG
 - 长期应修复 `reset_scene()` 使其完全清除 solver 内部状态，或在每次 trial/episode 前重建 scene
 
-### warm-up 排查实验
+### warm-up 排查结论
 
-目标：搞清楚 auto-tune 的 25 组 trial 到底改变了什么，能否用更简单的方式替代。
+| 实验 | settle steps | trials before | TCP err | delta_z |
+|------|-------------|---------------|---------|---------|
+| E48_repro2 | 30 | 25 (auto-tune) | 0.1mm | 0.0020 |
+| E48_no_autotune | 30 | 0 | 4.2mm | 0.0003 |
+| W1_settle200 | 200 | 0 | 4.2mm | 0.0003 |
+| W1_single_trial | 30 | 1 | - | ~0.0000 |
 
-已有对照：
-
-| 实验 | auto-tune | TCP err | delta_z |
-|------|-----------|---------|---------|
-| E48_repro2 | 开（25 trials） | 0.1mm | 0.0020 |
-| E48_no_autotune | 关 | 4.2mm | 0.0003 |
-
-排查分组（不开 auto-tune，固定 offset `[0.008, -0.004, -0.01]`）：
-
-1. `W1_settle200`：`reset_scene(settle_steps=200)`，看是否 settle 步数不够导致 PD 没收敛
-2. `W1_settle500`：`reset_scene(settle_steps=500)`，进一步确认
-3. `W1_dummy_trials`：不跑 auto-tune，但在正式 episode 前做 25 次 `reset_scene() + 90 步空跑`（不做 IK，只 step），看是否单纯"多跑物理步"就能改善
-4. `W1_single_trial`：只跑 1 次 trial（用同一 offset），看是否 1 次就够
-
-判断标准：只看 TCP offset from target，是否能回到 0.1mm 级别。
-
-预期：
-- 如果 W1_settle500 就能改善 → 根因是 settle 步数不够，修 `reset_scene()` 即可
-- 如果 W1_dummy_trials 能改善但 settle500 不行 → 根因是 solver 需要经历"真实物理交互"才能 warm-up
-- 如果只有真正的 auto-tune trial 能改善 → warm-up 依赖于特定的 IK 轨迹执行历史，更难绕过
+- settle 步数不是原因（200 步没有改善）
+- 1 次 trial 不够
+- Genesis solver 需要经历多次真实 IK 轨迹执行才能 warm up
+- `--auto-tune-offset` 必须保留在基线中

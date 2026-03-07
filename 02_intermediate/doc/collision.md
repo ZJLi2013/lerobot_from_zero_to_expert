@@ -85,26 +85,28 @@ Genesis 通过 MJCF 里的 `<geom class="collision">` 定义碰撞形状。
 - `open=15`、`close=-10`、`close_hold_steps=50`
 - `approach_z=0.012`
 - `cube_fixed = [0.16, 0.0, 0.015]`
-- `offset = [0.008, -0.004, -0.01]`
+- `offset`：由 auto-tune 从 5x5x1 网格中选出（必须保留 `--auto-tune-offset`，见 best_practices.md 基线说明）
 
-实验分组：
+实验分组与结果：
 
-- `C54`: 基线复现（与 `E48` 参数一致，默认 solver）
-- `C55`: 仅改 `frictionloss=0`（`so101_new_calib_v3_nofrictionloss.xml`）
-- `C56`: solver 强化（`implicitfast`, `substeps=8`, `iterations=100`, `ls_iterations=100`, `noslip=10`, `timeconst=0.005`）
+| 实验 | 变化 | auto-tune best offset | TCP err | delta_z |
+|------|------|----------------------|---------|---------|
+| C54b（基线） | 无 | `[0.008, -0.004, -0.01]` | 0.1mm | 0.0020 |
+| C55b（frictionloss=0） | 去掉 frictionloss | `[0.000, -0.004, -0.01]` | 0.1mm | 0.0014 |
+| C56b（solver 强化） | substeps=8, implicitfast, noslip=10 | `[0.004, 0.004, -0.01]` | 0.2mm | 0.0040 |
 
-判断标准：
+> **注意：** debug 阶段不应以 delta_z 作为主要指标，需看 dense PNG。
 
-> **注意：debug 阶段不应以 `delta_z` 作为主要指标。**
-> `delta_z` 只反映 box 最终高度变化，无法区分"被稳定夹住后抬起"和"被弹飞后落回"。
-> 当前阶段的判断必须以 dense PNG 逐帧目视为准，重点看接触形态而不是数值。
+- C54b 基线与 E48 一致，close 阶段有穿透，爪子穿到box内部了；然后 close-hold 阶段把 box 挤走了
+- C55b 在 close 阶段，仍然同 C54b 出现了穿透，爪子穿到box内部了；然后 close-hold 阶段也把 box 挤走了
+- C56b 在 close 阶段，也有穿透；然后 close-hold 阶段又把 box 挤走了
 
-1. `close` 阶段 box 是否仍保持持续 jaw-box 接触（与 `E48` 一致）
-2. 在持续接触前提下，压入/疑似穿透是否明显减轻
+这几组实验，hold 阶段，明显爪子间距已经非常小了。
+
+三组实验都出现了同一个模式：close 阶段穿透 -> close_hold 阶段 box 被挤走 -> hold 时爪子间距很小。frictionloss 和 solver 强化都没改变这个主导模式。这说明问题不在 solver 参数层面，而在更上游：jaw 的碰撞几何本身不能产生有效的夹持接触力。
 
 
 
 
-### 下一步
 
-先跑一组干净的基线（不开 auto-tune，无 trial 残留），确认在干净 scene 下用 E48 的 offset `[0.008, -0.004, -0.01]` 是什么表现，再决定后续 collision 对照怎么做。
+

@@ -289,8 +289,6 @@ def main():
     }
 
     rigid_kw = dict(enable_collision=True, enable_joint_limit=True)
-    if args.sim_substeps != 4:
-        pass  # substeps goes to SimOptions, not RigidOptions
     if args.integrator != "approximate_implicitfast":
         rigid_kw["integrator"] = integrator_map[args.integrator]
     if args.solver_iterations != 50:
@@ -352,12 +350,6 @@ def main():
     print(
         f"  cube sampling range    = x[{args.cube_x_min:.3f}, {args.cube_x_max:.3f}], "
         f"y[{args.cube_y_min:.3f}, {args.cube_y_max:.3f}]"
-    )
-    print(
-        "  rigid solver          = "
-        f"integrator={args.integrator}, substeps={args.sim_substeps}, "
-        f"iterations={args.solver_iterations}, noslip={args.noslip_iterations}, "
-        f"timeconst={args.constraint_timeconst:.4f}, gjk={args.use_gjk_collision}"
     )
     if args.cube_fixed_x is not None and args.cube_fixed_y is not None:
         print(
