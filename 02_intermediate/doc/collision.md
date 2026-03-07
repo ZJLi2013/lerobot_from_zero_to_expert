@@ -16,11 +16,13 @@ grasp_center offset → IK 求解 → approach 位姿
 
 关键点：链条上每一环都可能是瓶颈。当前已经通过 `E48` 确认前半段（offset → approach → 建立接触）基本可用，问题集中在后半段。
 
-## 3. 碰撞几何（collision geom）
+## 3. 背景概念
+
+### 3.1 碰撞几何（collision geom）
 
 Genesis 通过 MJCF 里的 `<geom class="collision">` 定义碰撞形状。
 
-当前 SO-101 jaw 的碰撞几何是原始 STL mesh。这不一定"不好"，但原始 mesh 用于窄面夹持时容易带来：
+当前 SO-101 jaw 的碰撞几何是原始 STL mesh。原始 mesh 用于窄面夹持时容易带来：
 
 - 接触点跳变（mesh 三角面片边缘不连续）
 - 法向不稳定
@@ -28,9 +30,16 @@ Genesis 通过 MJCF 里的 `<geom class="collision">` 定义碰撞形状。
 
 更适合夹持的碰撞近似：`box` > `capsule` > convex decomposition > raw mesh
 
-## 4. 接触参数（MJCF contact）
+### 3.2 visual geom vs collision geom
 
-建立接触后，以下参数决定接触力的行为：
+Genesis/MJCF 里，每个 body 可以同时有两种 geom：
+
+- **visual geom**（`class="visual"`）：只负责渲染画面，物理引擎完全忽略它
+- **collision geom**（`class="collision"`）：只负责碰撞检测和接触力计算，画面上看不到它
+
+两者可以完全不重合。画面上看到 jaw "穿过" box，不一定意味着 collision geom 也穿过了——有可能 collision geom 根本没碰到 box（因为位置/尺寸不对），也有可能 collision geom 已经碰到了但在另一个位置。
+
+### 3.3 接触参数（MJCF contact）
 
 | 参数 | 作用 | 当前状态 |
 |------|------|----------|
@@ -40,7 +49,7 @@ Genesis 通过 MJCF 里的 `<geom class="collision">` 定义碰撞形状。
 | `condim` | 接触摩擦维度（1=法向，3=法向+切向） | 默认 |
 | `contype / conaffinity` | 碰撞过滤 | 默认 |
 
-## 5. Genesis solver 参数
+### 3.4 Genesis solver 参数
 
 | 参数 | 作用 |
 |------|------|
@@ -51,7 +60,7 @@ Genesis 通过 MJCF 里的 `<geom class="collision">` 定义碰撞形状。
 | `integrator` | 数值积分器（`approximate_implicitfast` / `implicitfast`） |
 | `use_gjk_collision` | 替代碰撞检测方法，更稳但更慢 |
 
-## 6. 排查优先级
+## 4. 排查优先级
 
 ```text
 先改 jaw collision geom
@@ -63,50 +72,57 @@ Genesis 通过 MJCF 里的 `<geom class="collision">` 定义碰撞形状。
 最后才做 substeps / noslip / integrator / GJK 对照
 ```
 
-### 6.1 补充排查项
-
-1. **`frictionloss`**：Genesis 有已知 issue（#1569），`MJCF` 关节 `frictionloss` 可能导致碰撞异常。当前 `v3.xml` 存在 `frictionloss`，值得做最小对照。
-
-2. **`substeps`**：最直接的时间离散稳定化手段。对窄接触、快速闭合、薄 mesh 接触面有效。
-
-3. **`noslip_iterations`**：配合 `constraint_timeconst` 一起用，适合 manipulation/pinch 场景。
-
-4. **jaw collision mesh**：确认当前 finger collision 是否仍是 raw mesh，是否需要改成 box/capsule/convex。这是最可能带来质变的一步。
-
 ---
 
-## 7. collision 实验（基于 `E48` 基线）
+## 5. 实验记录
 
-`E48` 在 `close` 阶段确实建立了持续 jaw-box 接触（可观察到疑似穿透），是研究 collision 参数的合适基线。
-
-基线设置（与 `E48` 一致）：
-
-- `xml = so101_new_calib_v3.xml`
-- `open=15`、`close=-10`、`close_hold_steps=50`
-- `approach_z=0.012`
-- `cube_fixed = [0.16, 0.0, 0.015]`
-- `offset`：由 auto-tune 从 5x5x1 网格中选出（必须保留 `--auto-tune-offset`，见 best_practices.md 基线说明）
-
-实验分组与结果：
-
-| 实验 | 变化 | auto-tune best offset | TCP err | delta_z |
-|------|------|----------------------|---------|---------|
-| C54b（基线） | 无 | `[0.008, -0.004, -0.01]` | 0.1mm | 0.0020 |
-| C55b（frictionloss=0） | 去掉 frictionloss | `[0.000, -0.004, -0.01]` | 0.1mm | 0.0014 |
-| C56b（solver 强化） | substeps=8, implicitfast, noslip=10 | `[0.004, 0.004, -0.01]` | 0.2mm | 0.0040 |
+所有实验基于 E48 基线（详见 best_practices.md `## 基线（E48）`）。
 
 > **注意：** debug 阶段不应以 delta_z 作为主要指标，需看 dense PNG。
 
-- C54b 基线与 E48 一致，close 阶段有穿透，爪子穿到box内部了；然后 close-hold 阶段把 box 挤走了
-- C55b 在 close 阶段，仍然同 C54b 出现了穿透，爪子穿到box内部了；然后 close-hold 阶段也把 box 挤走了
-- C56b 在 close 阶段，也有穿透；然后 close-hold 阶段又把 box 挤走了
+### C54b — 基线复现
 
-这几组实验，hold 阶段，明显爪子间距已经非常小了。
+- 配置：`so101_new_calib_v3.xml`，默认 solver
+- auto-tune best offset：`[0.008, -0.004, -0.01]`
+- 现象：close 阶段穿透 → close_hold 阶段 box 被挤走 → hold 爪子间距很小 → lift 空抓
+- 结论：成功复现 E48，确认基线可靠
 
-三组实验都出现了同一个模式：close 阶段穿透 -> close_hold 阶段 box 被挤走 -> hold 时爪子间距很小。frictionloss 和 solver 强化都没改变这个主导模式。这说明问题不在 solver 参数层面，而在更上游：jaw 的碰撞几何本身不能产生有效的夹持接触力。
+### C55b — frictionloss=0
 
+- 配置：`so101_new_calib_v3_nofrictionloss.xml`，其余同 C54b
+- auto-tune best offset：`[0.000, -0.004, -0.01]`（与 C54b 不同）
+- 现象：与 C54b 同一模式（穿透 → 挤走 → 空抓）
+- 结论：frictionloss 不是穿透主因，但改变了最优 offset
 
+### C56b — solver 强化
 
+- 配置：`so101_new_calib_v3.xml` + `substeps=8, implicitfast, iterations=100, noslip=10, timeconst=0.005`
+- auto-tune best offset：`[0.004, 0.004, -0.01]`（与 C54b 不同）
+- 现象：与 C54b 同一模式；trial #19 出现 delta_z=0.118m 异常（box 被弹飞）
+- 结论：solver 强化没改变主导模式，且在某些 offset 下产生不稳定接触力
 
+**C54b-C56b 小结：** 三组都出现同一模式（穿透 → 挤走 → 空抓），frictionloss 和 solver 强化都没改变。问题在更上游：jaw 的 raw mesh collision geom 不能产生有效的夹持接触力。
 
+---
 
+### C57 — jaw collision geom 换 box primitive
+
+- 配置：`so101_new_calib_v3_jawbox.xml`（moving_jaw 和 fixed_jaw 的 collision 从 raw mesh 换成 box primitive），其余同 C54b
+- auto-tune best offset：`[0.004, 0.004, -0.01]`
+- 现象：
+  - close 阶段：visual jaw 仍穿过 box（因为 visual geom 没改）
+  - close_hold 阶段：box **没被挤走**（留在原地）— 这是和 C54b 最大的区别
+  - hold 阶段：爪子间距已小于 box
+  - lift 阶段：空抓
+- 分析：
+  - collision box 的位置/尺寸是估算的，没有准确覆盖 jaw 内侧夹持面
+  - 因此 collision box 既没挡住 cube（没产生夹持力），也没产生 raw mesh 那种不稳定侧向推力
+  - box primitive 方向是对的（不再挤走），但需要调准位置才能真正夹住
+
+### 下一步
+
+把 collision box 的 pos/size 调到真正覆盖 jaw 内侧夹持面：
+
+1. 从 visual mesh 顶点数据读出 jaw 内侧面的实际位置范围
+2. 或用 Genesis geom 可视化（`group=3`）直接看 collision box 位置
+3. 迭代调整直到 collision box 和 visual jaw 内侧面大致重合
