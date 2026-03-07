@@ -11,6 +11,7 @@ Usage:
   python 3_grasp_experiment.py --exp-id E2_auto --auto-tune-offset
   python 3_grasp_experiment.py --xml /path/to/so101.xml --exp-id E3
 """
+
 import argparse
 import inspect
 import json
@@ -34,7 +35,8 @@ def ensure_display():
     print("[display] Starting Xvfb :99 ...")
     proc = subprocess.Popen(
         ["Xvfb", ":99", "-screen", "0", "1280x1024x24", "-ac", "+extension", "GLX"],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
     os.environ["DISPLAY"] = ":99"
     time.sleep(2)
@@ -60,9 +62,11 @@ def render_camera(cam):
 def save_rgb_png(arr, path):
     try:
         from PIL import Image
+
         Image.fromarray(arr).save(path)
     except ImportError:
         import imageio.v2 as imageio
+
         imageio.imwrite(path, arr)
 
 
@@ -84,6 +88,7 @@ def find_so101_xml(user_path=None):
     ]
     try:
         import lerobot
+
         base = Path(lerobot.__file__).parent
         for sub in [
             "common/robot_devices/robots/assets",
@@ -102,6 +107,7 @@ def find_so101_xml(user_path=None):
 
     try:
         from huggingface_hub import snapshot_download
+
         print("  … downloading SO101 MJCF from Genesis-Intelligence/assets")
         asset_dir = snapshot_download(
             repo_type="dataset",
@@ -121,8 +127,12 @@ def find_so101_xml(user_path=None):
 # ── Constants (proven working with MJCF from 2_collect.py) ────────────────────
 
 JOINT_NAMES = [
-    "shoulder_pan", "shoulder_lift", "elbow_flex",
-    "wrist_flex", "wrist_roll", "gripper",
+    "shoulder_pan",
+    "shoulder_lift",
+    "elbow_flex",
+    "wrist_flex",
+    "wrist_roll",
+    "gripper",
 ]
 HOME_DEG = np.array([0.0, -30.0, 90.0, -60.0, 0.0, 0.0], dtype=np.float32)
 IK_QUAT_DOWN = np.array([0.0, 1.0, 0.0, 0.0])
@@ -147,16 +157,29 @@ def main():
     parser.add_argument("--save", default="/output")
     parser.add_argument("--xml", default=None, help="Path to so101_new_calib.xml")
     parser.add_argument("--cpu", action="store_true")
-    parser.add_argument("--gripper-open", type=float, default=0.0,
-                        help="Gripper open angle in degrees")
-    parser.add_argument("--gripper-close", type=float, default=25.0,
-                        help="Gripper close angle in degrees")
-    parser.add_argument("--pre-close-steps", type=int, default=0,
-                        help="Number of hold steps at the approach pose before closing")
+    parser.add_argument(
+        "--gripper-open", type=float, default=0.0, help="Gripper open angle in degrees"
+    )
+    parser.add_argument(
+        "--gripper-close",
+        type=float,
+        default=25.0,
+        help="Gripper close angle in degrees",
+    )
+    parser.add_argument(
+        "--pre-close-steps",
+        type=int,
+        default=0,
+        help="Number of hold steps at the approach pose before closing",
+    )
     parser.add_argument("--close-hold-steps", type=int, default=12)
     parser.add_argument("--lift-threshold", type=float, default=0.01)
-    parser.add_argument("--approach-z", type=float, default=0.02,
-                        help="Z offset above cube center for approach (m)")
+    parser.add_argument(
+        "--approach-z",
+        type=float,
+        default=0.02,
+        help="Z offset above cube center for approach (m)",
+    )
     parser.add_argument("--grasp-offset-x", type=float, default=0.0)
     parser.add_argument("--grasp-offset-y", type=float, default=0.0)
     parser.add_argument("--grasp-offset-z", type=float, default=0.0)
@@ -164,24 +187,59 @@ def main():
     parser.add_argument("--offset-x-candidates", default="-0.01,-0.005,0.0,0.005,0.01")
     parser.add_argument("--offset-y-candidates", default="-0.01,-0.005,0.0,0.005,0.01")
     parser.add_argument("--offset-z-candidates", default="-0.02,-0.01,0.0,0.01")
-    parser.add_argument("--cube-x-min", type=float, default=0.12,
-                        help="Minimum sampled cube center x in world frame (m)")
-    parser.add_argument("--cube-x-max", type=float, default=0.20,
-                        help="Maximum sampled cube center x in world frame (m)")
-    parser.add_argument("--cube-y-min", type=float, default=-0.05,
-                        help="Minimum sampled cube center y in world frame (m)")
-    parser.add_argument("--cube-y-max", type=float, default=0.05,
-                        help="Maximum sampled cube center y in world frame (m)")
-    parser.add_argument("--cube-fixed-x", type=float, default=None,
-                        help="If set, fix cube center x to this world-frame value (m)")
-    parser.add_argument("--cube-fixed-y", type=float, default=None,
-                        help="If set, fix cube center y to this world-frame value (m)")
-    parser.add_argument("--cube-fixed-z", type=float, default=0.015,
-                        help="Cube center z to use when a fixed cube pose is requested (m)")
-    parser.add_argument("--export-close-debug-pngs", action="store_true",
-                        help="Export dense stitched PNGs around the close phase for debugging")
-    parser.add_argument("--debug-close-context", type=int, default=4,
-                        help="Frames to include before/after the close-related phases in debug PNG export")
+    parser.add_argument(
+        "--cube-x-min",
+        type=float,
+        default=0.12,
+        help="Minimum sampled cube center x in world frame (m)",
+    )
+    parser.add_argument(
+        "--cube-x-max",
+        type=float,
+        default=0.20,
+        help="Maximum sampled cube center x in world frame (m)",
+    )
+    parser.add_argument(
+        "--cube-y-min",
+        type=float,
+        default=-0.05,
+        help="Minimum sampled cube center y in world frame (m)",
+    )
+    parser.add_argument(
+        "--cube-y-max",
+        type=float,
+        default=0.05,
+        help="Maximum sampled cube center y in world frame (m)",
+    )
+    parser.add_argument(
+        "--cube-fixed-x",
+        type=float,
+        default=None,
+        help="If set, fix cube center x to this world-frame value (m)",
+    )
+    parser.add_argument(
+        "--cube-fixed-y",
+        type=float,
+        default=None,
+        help="If set, fix cube center y to this world-frame value (m)",
+    )
+    parser.add_argument(
+        "--cube-fixed-z",
+        type=float,
+        default=0.015,
+        help="Cube center z to use when a fixed cube pose is requested (m)",
+    )
+    parser.add_argument(
+        "--export-close-debug-pngs",
+        action="store_true",
+        help="Export dense stitched PNGs around the close phase for debugging",
+    )
+    parser.add_argument(
+        "--debug-close-context",
+        type=int,
+        default=4,
+        help="Frames to include before/after the close-related phases in debug PNG export",
+    )
     args = parser.parse_args()
 
     # ── [1] Locate MJCF ──────────────────────────────────────────────────────
@@ -206,7 +264,9 @@ def main():
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(dt=1.0 / args.fps, substeps=4),
-        rigid_options=gs.options.RigidOptions(enable_collision=True, enable_joint_limit=True),
+        rigid_options=gs.options.RigidOptions(
+            enable_collision=True, enable_joint_limit=True
+        ),
         show_viewer=False,
     )
     scene.add_entity(gs.morphs.Plane())
@@ -215,9 +275,7 @@ def main():
         gs.morphs.Box(size=(0.03, 0.03, 0.03), pos=(0.15, 0.0, 0.015)),
         surface=gs.surfaces.Default(color=(1.0, 0.3, 0.3, 1.0)),
     )
-    so101 = scene.add_entity(
-        gs.morphs.MJCF(file=str(xml_path), pos=(0.0, 0.0, 0.0))
-    )
+    so101 = scene.add_entity(gs.morphs.MJCF(file=str(xml_path), pos=(0.0, 0.0, 0.0)))
     print(f"  ✓ SO-101 loaded via MJCF")
 
     # For grasp debugging, keep one proven side view and reuse the old "up"
@@ -225,20 +283,34 @@ def main():
     # much easier to judge whether the cube is actually entering the pinch region.
     cam_up = scene.add_camera(
         res=(args.img_w, args.img_h),
-        pos=(0.42, 0.34, 0.26), lookat=(0.15, 0.0, 0.08), fov=38, GUI=False,
+        pos=(0.42, 0.34, 0.26),
+        lookat=(0.15, 0.0, 0.08),
+        fov=38,
+        GUI=False,
     )
     cam_side = scene.add_camera(
         res=(args.img_w, args.img_h),
-        pos=(0.5, -0.4, 0.3), lookat=(0.15, 0.0, 0.1), fov=45, GUI=False,
+        pos=(0.5, -0.4, 0.3),
+        lookat=(0.15, 0.0, 0.1),
+        fov=45,
+        GUI=False,
     )
     scene.build()
     print("  ✓ scene built")
-    print("  camera[up/debug_side2] = pos=(0.42, 0.34, 0.26), lookat=(0.15, 0.0, 0.08), fov=38")
-    print("  camera[side]           = pos=(0.5, -0.4, 0.3), lookat=(0.15, 0.0, 0.1), fov=45")
-    print(f"  cube sampling range    = x[{args.cube_x_min:.3f}, {args.cube_x_max:.3f}], "
-          f"y[{args.cube_y_min:.3f}, {args.cube_y_max:.3f}]")
+    print(
+        "  camera[up/debug_side2] = pos=(0.42, 0.34, 0.26), lookat=(0.15, 0.0, 0.08), fov=38"
+    )
+    print(
+        "  camera[side]           = pos=(0.5, -0.4, 0.3), lookat=(0.15, 0.0, 0.1), fov=45"
+    )
+    print(
+        f"  cube sampling range    = x[{args.cube_x_min:.3f}, {args.cube_x_max:.3f}], "
+        f"y[{args.cube_y_min:.3f}, {args.cube_y_max:.3f}]"
+    )
     if args.cube_fixed_x is not None and args.cube_fixed_y is not None:
-        print(f"  cube fixed pose        = [{args.cube_fixed_x:.4f}, {args.cube_fixed_y:.4f}, {args.cube_fixed_z:.4f}]")
+        print(
+            f"  cube fixed pose        = [{args.cube_fixed_x:.4f}, {args.cube_fixed_y:.4f}, {args.cube_fixed_z:.4f}]"
+        )
 
     # ── [3] Joints + EE + PD + Home ──────────────────────────────────────────
     stage("3/6  Joints + PD + Home")
@@ -255,7 +327,15 @@ def main():
 
     ee_link = None
     ee_name = None
-    for candidate in ["grasp_center", "moving_jaw_so101_v1", "Moving_Jaw", "Fixed_Jaw", "gripper_link", "gripperframe", "gripper"]:
+    for candidate in [
+        "grasp_center",
+        "moving_jaw_so101_v1",
+        "Moving_Jaw",
+        "Fixed_Jaw",
+        "gripper_link",
+        "gripperframe",
+        "gripper",
+    ]:
         try:
             ee_link = so101.get_link(candidate)
             ee_name = candidate
@@ -284,7 +364,9 @@ def main():
     print(f"  HOME = {home_deg.tolist()}")
     print(f"  tracking: mean_err={home_err:.2f}°")
 
-    ik_supports_local_point = "local_point" in inspect.signature(so101.inverse_kinematics).parameters
+    ik_supports_local_point = (
+        "local_point" in inspect.signature(so101.inverse_kinematics).parameters
+    )
     print(f"  IK supports local_point = {ik_supports_local_point}")
 
     gripper_ref = None
@@ -299,7 +381,9 @@ def main():
             tcp_world = 0.5 * (jaw_pos + grip_pos)
             tcp_half_span_world = 0.5 * (grip_pos - jaw_pos)
             if ik_supports_local_point:
-                tcp_local_point = gu.inv_transform_by_quat(tcp_world - jaw_pos, jaw_quat)
+                tcp_local_point = gu.inv_transform_by_quat(
+                    tcp_world - jaw_pos, jaw_quat
+                )
                 print(
                     "  TCP proxy (jaw<->gripper midpoint): "
                     f"world=[{tcp_world[0]:.4f}, {tcp_world[1]:.4f}, {tcp_world[2]:.4f}], "
@@ -347,16 +431,20 @@ def main():
                 max_solver_iters=50,
                 damping=0.02,
             )
-        q_test_np = to_numpy(q_test) if hasattr(q_test, 'cpu') else np.array(q_test)
+        q_test_np = to_numpy(q_test) if hasattr(q_test, "cpu") else np.array(q_test)
         so101.set_qpos(q_test_np)
         so101.control_dofs_position(q_test_np, dof_idx)
         for _ in range(15):
             scene.step()
         ee_pos_check = to_numpy(ee_link.get_pos())
         ee_quat_check = to_numpy(ee_link.get_quat())
-        grip_pos_check = to_numpy(gripper_ref.get_pos()) if gripper_ref is not None else None
+        grip_pos_check = (
+            to_numpy(gripper_ref.get_pos()) if gripper_ref is not None else None
+        )
         if ik_supports_local_point and tcp_local_point is not None:
-            tcp_check = ee_pos_check + gu.transform_by_quat(tcp_local_point, ee_quat_check)
+            tcp_check = ee_pos_check + gu.transform_by_quat(
+                tcp_local_point, ee_quat_check
+            )
         elif grip_pos_check is not None:
             tcp_check = 0.5 * (ee_pos_check + grip_pos_check)
         else:
@@ -380,7 +468,9 @@ def main():
                         quat=None,
                         init_qpos=home_rad,
                     )
-                    q_alt_np = to_numpy(q_alt) if hasattr(q_alt, 'cpu') else np.array(q_alt)
+                    q_alt_np = (
+                        to_numpy(q_alt) if hasattr(q_alt, "cpu") else np.array(q_alt)
+                    )
                     so101.set_qpos(q_alt_np)
                     so101.control_dofs_position(q_alt_np, dof_idx)
                     for _ in range(15):
@@ -399,9 +489,13 @@ def main():
                 ik_err = best_link_err
                 print(f"    → switched to EE link = {ee_name}")
         if ik_err < 0.03:
-            print(f"  ✓ IK sanity check passed (EE link = {ee_name}, err={ik_err:.4f}m)")
+            print(
+                f"  ✓ IK sanity check passed (EE link = {ee_name}, err={ik_err:.4f}m)"
+            )
         else:
-            print(f"  ⚠ IK accuracy limited (err={ik_err:.4f}m), proceeding with best: {ee_name}")
+            print(
+                f"  ⚠ IK accuracy limited (err={ik_err:.4f}m), proceeding with best: {ee_name}"
+            )
         so101.set_qpos(home_rad)
         for _ in range(30):
             scene.step()
@@ -460,13 +554,21 @@ def main():
         so101.set_qpos(home_rad)
         so101.control_dofs_position(home_rad, dof_idx)
         so101.zero_all_dofs_velocity()
-        cube.set_pos(torch.tensor(cube_pos, dtype=torch.float32, device=gs.device).unsqueeze(0))
-        cube.set_quat(torch.tensor([1, 0, 0, 0], dtype=torch.float32, device=gs.device).unsqueeze(0))
+        cube.set_pos(
+            torch.tensor(cube_pos, dtype=torch.float32, device=gs.device).unsqueeze(0)
+        )
+        cube.set_quat(
+            torch.tensor([1, 0, 0, 0], dtype=torch.float32, device=gs.device).unsqueeze(
+                0
+            )
+        )
         cube.zero_all_dofs_velocity()
         for _ in range(settle_steps):
             scene.step()
 
-    def build_trajectory_chained_ik(cube_pos, offset_x, offset_y, offset_z, total_steps, verbose=False):
+    def build_trajectory_chained_ik(
+        cube_pos, offset_x, offset_y, offset_z, total_steps, verbose=False
+    ):
         """Build trajectory with chained IK seeding: each solve uses the previous solution as seed."""
         off = np.array([offset_x, offset_y, offset_z])
 
@@ -515,20 +617,32 @@ def main():
                 scene.step()
             ee_pos = to_numpy(ee_link.get_pos())
             ee_quat = to_numpy(ee_link.get_quat())
-            grip_pos = to_numpy(gripper_ref.get_pos()) if gripper_ref is not None else None
+            grip_pos = (
+                to_numpy(gripper_ref.get_pos()) if gripper_ref is not None else None
+            )
             if ik_supports_local_point and tcp_local_point is not None:
                 tcp_pos = ee_pos + gu.transform_by_quat(tcp_local_point, ee_quat)
             elif grip_pos is not None:
                 tcp_pos = 0.5 * (ee_pos + grip_pos)
             else:
                 tcp_pos = ee_pos
-            print(f"    [diag] IK approach target: [{pos_approach[0]:.4f}, {pos_approach[1]:.4f}, {pos_approach[2]:.4f}]")
-            print(f"    [diag] EE actual position:  [{ee_pos[0]:.4f}, {ee_pos[1]:.4f}, {ee_pos[2]:.4f}]")
-            print(f"    [diag] TCP actual position: [{tcp_pos[0]:.4f}, {tcp_pos[1]:.4f}, {tcp_pos[2]:.4f}]")
-            print(f"    [diag] TCP offset from target: [{tcp_pos[0]-pos_approach[0]:.4f}, {tcp_pos[1]-pos_approach[1]:.4f}, {tcp_pos[2]-pos_approach[2]:.4f}]")
+            print(
+                f"    [diag] IK approach target: [{pos_approach[0]:.4f}, {pos_approach[1]:.4f}, {pos_approach[2]:.4f}]"
+            )
+            print(
+                f"    [diag] EE actual position:  [{ee_pos[0]:.4f}, {ee_pos[1]:.4f}, {ee_pos[2]:.4f}]"
+            )
+            print(
+                f"    [diag] TCP actual position: [{tcp_pos[0]:.4f}, {tcp_pos[1]:.4f}, {tcp_pos[2]:.4f}]"
+            )
+            print(
+                f"    [diag] TCP offset from target: [{tcp_pos[0]-pos_approach[0]:.4f}, {tcp_pos[1]-pos_approach[1]:.4f}, {tcp_pos[2]-pos_approach[2]:.4f}]"
+            )
             for other_link in so101.links:
                 other_pos = to_numpy(so101.get_link(other_link.name).get_pos())
-                print(f"    [diag] link '{other_link.name}': [{other_pos[0]:.4f}, {other_pos[1]:.4f}, {other_pos[2]:.4f}]")
+                print(
+                    f"    [diag] link '{other_link.name}': [{other_pos[0]:.4f}, {other_pos[1]:.4f}, {other_pos[2]:.4f}]"
+                )
 
         traj = []
         phases = []
@@ -622,18 +736,25 @@ def main():
 
     def export_close_debug_pngs(ep_data, ep_idx):
         close_like = {"pre_close_hold", "close", "close_hold"}
-        close_indices = [i for i, phase in enumerate(ep_data["phase"]) if phase in close_like]
+        close_indices = [
+            i for i, phase in enumerate(ep_data["phase"]) if phase in close_like
+        ]
         if not close_indices:
             return
 
         start = max(0, close_indices[0] - args.debug_close_context)
-        end = min(len(ep_data["phase"]), close_indices[-1] + args.debug_close_context + 1)
+        end = min(
+            len(ep_data["phase"]), close_indices[-1] + args.debug_close_context + 1
+        )
         debug_dir = out_dir / "close_debug_pngs"
         debug_dir.mkdir(parents=True, exist_ok=True)
 
         for i in range(start, end):
             stitched = np.concatenate(
-                [ep_data["observation.images.up"][i], ep_data["observation.images.side"][i]],
+                [
+                    ep_data["observation.images.up"][i],
+                    ep_data["observation.images.side"][i],
+                ],
                 axis=1,
             )
             phase = ep_data["phase"][i]
@@ -650,18 +771,24 @@ def main():
 
         # Randomize cube unless a fixed debug pose is requested.
         if args.cube_fixed_x is not None and args.cube_fixed_y is not None:
-            cube_pos = np.array([
-                args.cube_fixed_x,
-                args.cube_fixed_y,
-                args.cube_fixed_z,
-            ])
+            cube_pos = np.array(
+                [
+                    args.cube_fixed_x,
+                    args.cube_fixed_y,
+                    args.cube_fixed_z,
+                ]
+            )
         else:
-            cube_pos = np.array([
-                np.random.uniform(args.cube_x_min, args.cube_x_max),
-                np.random.uniform(args.cube_y_min, args.cube_y_max),
-                0.015,
-            ])
-        cube.set_pos(torch.tensor(cube_pos, dtype=torch.float32, device=gs.device).unsqueeze(0))
+            cube_pos = np.array(
+                [
+                    np.random.uniform(args.cube_x_min, args.cube_x_max),
+                    np.random.uniform(args.cube_y_min, args.cube_y_max),
+                    0.015,
+                ]
+            )
+        cube.set_pos(
+            torch.tensor(cube_pos, dtype=torch.float32, device=gs.device).unsqueeze(0)
+        )
         for _ in range(15):
             scene.step()
         cube_pos = to_numpy(cube.get_pos())
@@ -669,7 +796,8 @@ def main():
 
         # Optional auto-tune offset (grid search over x/y/z)
         chosen_offset = np.array(
-            [args.grasp_offset_x, args.grasp_offset_y, args.grasp_offset_z], dtype=np.float64
+            [args.grasp_offset_x, args.grasp_offset_y, args.grasp_offset_z],
+            dtype=np.float64,
         )
         if args.auto_tune_offset:
             x_cands = parse_csv_floats(args.offset_x_candidates)
@@ -688,9 +816,9 @@ def main():
                             delta = run_trial(cube_pos, ox, oy, oz)
                         except Exception:
                             delta = -1.0
-                        search_log.append({
-                            "ox": ox, "oy": oy, "oz": oz, "delta_z": float(delta)
-                        })
+                        search_log.append(
+                            {"ox": ox, "oy": oy, "oz": oz, "delta_z": float(delta)}
+                        )
                         if delta > best_delta:
                             best_delta = delta
                             best_xyz = (ox, oy, oz)
@@ -701,7 +829,9 @@ def main():
                                 f"ox={ox:+.3f} oy={oy:+.3f} oz={oz:+.3f} → Δz={delta:+.4f}m"
                             )
             chosen_offset[:] = best_xyz
-            print(f"  ✓ best offset=({best_xyz[0]:+.3f}, {best_xyz[1]:+.3f}, {best_xyz[2]:+.3f}) Δz={best_delta:+.4f}m")
+            print(
+                f"  ✓ best offset=({best_xyz[0]:+.3f}, {best_xyz[1]:+.3f}, {best_xyz[2]:+.3f}) Δz={best_delta:+.4f}m"
+            )
             metrics["auto_tune"] = {
                 "enabled": True,
                 "best_offset": [float(v) for v in best_xyz],
@@ -709,7 +839,9 @@ def main():
                 "search_log": search_log,
             }
         else:
-            print(f"  offset = ({chosen_offset[0]:+.3f}, {chosen_offset[1]:+.3f}, {chosen_offset[2]:+.3f})")
+            print(
+                f"  offset = ({chosen_offset[0]:+.3f}, {chosen_offset[1]:+.3f}, {chosen_offset[2]:+.3f})"
+            )
             metrics["auto_tune"] = {"enabled": False}
 
         metrics["selected_grasp_offset"] = [float(v) for v in chosen_offset]
@@ -720,9 +852,16 @@ def main():
         reset_scene(cube_pos, settle_steps=30)
 
         trajectory, labels = build_trajectory_chained_ik(
-            cube_pos, chosen_offset[0], chosen_offset[1], chosen_offset[2],
-            total_steps=steps_per_episode, verbose=True,
+            cube_pos,
+            chosen_offset[0],
+            chosen_offset[1],
+            chosen_offset[2],
+            total_steps=steps_per_episode,
+            verbose=True,
         )
+
+        # The verbose diagnostic above moves the robot/cube — reset before the actual episode
+        reset_scene(cube_pos, settle_steps=30)
 
         ep_data = {
             "observation.state": [],
@@ -769,14 +908,16 @@ def main():
             cube_z_after_lift = float(to_numpy(cube.get_pos())[2])
         lift_delta = cube_z_after_lift - cube_z_before_close
         grasp_success = 1 if lift_delta > args.lift_threshold else 0
-        metrics["episodes"].append({
-            "episode": ep,
-            "cube_pos": cube_pos.tolist(),
-            "cube_z_before_close": cube_z_before_close,
-            "cube_z_after_lift": cube_z_after_lift,
-            "cube_lift_delta": lift_delta,
-            "grasp_success": grasp_success,
-        })
+        metrics["episodes"].append(
+            {
+                "episode": ep,
+                "cube_pos": cube_pos.tolist(),
+                "cube_z_before_close": cube_z_before_close,
+                "cube_z_after_lift": cube_z_after_lift,
+                "cube_lift_delta": lift_delta,
+                "grasp_success": grasp_success,
+            }
+        )
         print(
             f"  [ep {ep}] grasp={'✓' if grasp_success else '✗'} "
             f"delta_z={lift_delta:.4f}m "
@@ -787,20 +928,32 @@ def main():
     stage("6/6  保存")
     import rerun as rr
 
-    all_states = np.concatenate([np.stack(e["observation.state"]) for e in all_episodes])
+    all_states = np.concatenate(
+        [np.stack(e["observation.state"]) for e in all_episodes]
+    )
     all_actions = np.concatenate([np.stack(e["action"]) for e in all_episodes])
-    all_imgs_up = np.concatenate([np.stack(e["observation.images.up"]) for e in all_episodes])
-    all_imgs_side = np.concatenate([np.stack(e["observation.images.side"]) for e in all_episodes])
+    all_imgs_up = np.concatenate(
+        [np.stack(e["observation.images.up"]) for e in all_episodes]
+    )
+    all_imgs_side = np.concatenate(
+        [np.stack(e["observation.images.side"]) for e in all_episodes]
+    )
     all_ts = np.concatenate([np.array(e["timestamp"]) for e in all_episodes])
     all_fi = np.concatenate([np.array(e["frame_index"]) for e in all_episodes])
     all_ei = np.concatenate([np.array(e["episode_index"]) for e in all_episodes])
-    all_cube_z = np.concatenate([np.array(e["cube_z"], dtype=np.float32) for e in all_episodes])
+    all_cube_z = np.concatenate(
+        [np.array(e["cube_z"], dtype=np.float32) for e in all_episodes]
+    )
 
     for name, arr in [
-        ("states", all_states), ("actions", all_actions),
-        ("images_up", all_imgs_up), ("images_side", all_imgs_side),
-        ("timestamps", all_ts), ("frame_indices", all_fi),
-        ("episode_indices", all_ei), ("cube_z", all_cube_z),
+        ("states", all_states),
+        ("actions", all_actions),
+        ("images_up", all_imgs_up),
+        ("images_side", all_imgs_side),
+        ("timestamps", all_ts),
+        ("frame_indices", all_fi),
+        ("episode_indices", all_ei),
+        ("cube_z", all_cube_z),
     ]:
         np.save(out_dir / f"{name}.npy", arr)
         print(f"  {name}: {arr.shape}")
@@ -838,7 +991,9 @@ def main():
     print(f"  Grasp success: {total_success}/{total_eps}")
     if metrics.get("auto_tune", {}).get("enabled"):
         best = metrics["auto_tune"]
-        print(f"  Best offset: {best['best_offset']}, Δz={best['best_lift_delta']:.4f}m")
+        print(
+            f"  Best offset: {best['best_offset']}, Δz={best['best_lift_delta']:.4f}m"
+        )
     print(f"  Output: {out_dir}")
     print(f"{'═'*60}\n")
 
