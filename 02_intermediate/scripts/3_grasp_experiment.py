@@ -286,22 +286,31 @@ def main():
         "Euler": gs.integrator.Euler,
     }
 
+    rigid_kw = dict(enable_collision=True, enable_joint_limit=True)
+    if args.sim_substeps != 4:
+        pass  # substeps goes to SimOptions, not RigidOptions
+    if args.integrator != "approximate_implicitfast":
+        rigid_kw["integrator"] = integrator_map[args.integrator]
+    if args.solver_iterations != 50:
+        rigid_kw["iterations"] = args.solver_iterations
+    if args.solver_tolerance != 1e-6:
+        rigid_kw["tolerance"] = args.solver_tolerance
+    if args.solver_ls_iterations != 50:
+        rigid_kw["ls_iterations"] = args.solver_ls_iterations
+    if args.solver_ls_tolerance != 1e-2:
+        rigid_kw["ls_tolerance"] = args.solver_ls_tolerance
+    if args.noslip_iterations != 0:
+        rigid_kw["noslip_iterations"] = args.noslip_iterations
+    if args.constraint_timeconst != 0.01:
+        rigid_kw["constraint_timeconst"] = args.constraint_timeconst
+    if args.use_gjk_collision:
+        rigid_kw["use_gjk_collision"] = True
+
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=1.0 / args.fps, substeps=args.sim_substeps
         ),
-        rigid_options=gs.options.RigidOptions(
-            enable_collision=True,
-            enable_joint_limit=True,
-            integrator=integrator_map[args.integrator],
-            iterations=args.solver_iterations,
-            tolerance=args.solver_tolerance,
-            ls_iterations=args.solver_ls_iterations,
-            ls_tolerance=args.solver_ls_tolerance,
-            noslip_iterations=args.noslip_iterations,
-            constraint_timeconst=args.constraint_timeconst,
-            use_gjk_collision=args.use_gjk_collision,
-        ),
+        rigid_options=gs.options.RigidOptions(**rigid_kw),
         show_viewer=False,
     )
     scene.add_entity(gs.morphs.Plane())
