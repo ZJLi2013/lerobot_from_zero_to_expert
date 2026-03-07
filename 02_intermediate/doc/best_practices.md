@@ -155,6 +155,10 @@ python 3_grasp_experiment.py \
 
 ### 6.2 抓取成功判定
 
+> **注意：`delta_z` 只适合做最终批量评估的粗筛指标，不适合在 debug 阶段作为主要判据。**
+> 在 debug/collision 排查阶段，`delta_z` 无法区分"被稳定夹住后抬起"和"被弹飞后落回"等完全不同的物理过程。
+> 当前阶段应以 dense PNG 逐帧目视为准，重点看接触形态。
+
 | 等级 | 条件 | 含义 |
 |------|------|------|
 | **成功** | `delta > 0.01m` | 方块被稳定抬起 |
@@ -323,7 +327,6 @@ E41/E42/E44 的 close 阶段 debug PNGs 清楚显示：jaw mesh 尖端远低于 
 - `gripper_close` 会直接决定 jaw 继续向内压的目标角度
 - 但"碰到 box 后能否被稳定挡住"并不只由 `gripper_close` 决定，还受 collision/contact 建模影响
 
-
 #### B. 推理分析
 
 **当前第一优先级不是继续放大 `open`，而是修正 `offset_x/offset_y`**
@@ -372,3 +375,59 @@ collision 对照分组：
    - 诊断性地试 `use_gjk_collision=True`
 
 简单说，当前问题已经从"动作学没调好"切换成了"接触建模还不够可信"。
+
+---
+
+## 11. `3_grasp_experiment.py` 执行流程：trial vs full episode
+
+### 脚本整体流程
+
+```text
+for each episode:
+    1. reset scene（robot 回 home，cube 放到指定位置）
+    2. 如果开了 --auto-tune-offset：
+       a. 遍历 offset_x/y/z 候选网格（例如 5×5×1 = 25 组）
+       b. 每组候选调用 run_trial()：
+          - reset_scene()（settle_steps=20）
+          - build_trajectory_chained_ik()（total_steps=90，比正式 episode 短）
+          - 逐帧 step，记录 close 前后 cube_z
+          - 返回 delta_z
+       c. 选 delta_z 最大的候选作为 chosen_offset
+    3. 用 chosen_offset 跑正式 full episode：
+       - reset_scene()（settle_steps=30）
+       - build_trajectory_chained_ik()（total_steps=完整长度）
+       - 逐帧 step，同时录制图像
+       - 导出 dense PNG
+```
+
+### trial 和 full episode 的区别
+
+| | trial（`run_trial()`） | full episode |
+|---|---|---|
+| 目的 | 快速评估一组 offset 的 delta_z | 正式数据采集 + 图像录制 |
+| 长度 | 90 步（短） | 完整 episode（长） |
+| 图像 | 不录制 | 录制并导出 PNG |
+| 在 scene 中 | 共享同一个 Genesis scene | 共享同一个 Genesis scene |
+| reset | 每次 trial 前 reset（settle=20） | episode 前 reset（settle=30） |
+
+### 已知问题：trial 残留影响 full episode
+
+当开 `--auto-tune-offset` 时，25 组 trial 会在正式 episode 之前在同一个 Genesis scene 里执行。虽然每次 trial 和正式 episode 前都有 `reset_scene()`，但 reset 只重置了：
+
+- robot 关节位置（`set_qpos`）
+- robot 关节速度（`zero_all_dofs_velocity`）
+- cube 位置和朝向
+- cube 速度
+
+它**没有重置** Genesis solver 的内部数值状态（如 constraint warm-start、contact cache 等）。这意味着：
+
+- 不开 auto-tune 直接跑 full episode → 干净 scene，solver 从冷启动开始
+- 开了 auto-tune 后再跑 full episode → scene 内部状态被 25 组 trial 的物理步"预热"过
+
+实验验证：用完全相同的 offset `[0.008, -0.004, -0.01]`，`E48`（开了 auto-tune）和 `C54`（不开 auto-tune）在同一帧（f056）的 jaw 位置明显不同，说明 trial 历史确实影响了正式 episode 的物理轨迹。
+
+### 实验设计建议
+
+- 如果实验间需要做公平对照，所有组要么都开 auto-tune（走相同的 trial 历史），要么都不开
+- 不能用"开了 auto-tune 的实验"和"没开 auto-tune 的实验"直接对比 dense PNG
+- 长期应修复 `reset_scene()` 使其完全清除 solver 内部状态，或在每次 trial/episode 前重建 scene
