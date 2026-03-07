@@ -245,6 +245,8 @@ def main():
         action="store_true",
         help="Only export close debug PNGs; skip npy, rrd, and metrics.json outputs",
     )
+    parser.add_argument("--settle-steps", type=int, default=30,
+                        help="Physics steps to settle after reset_scene before episode")
     parser.add_argument("--sim-substeps", type=int, default=4)
     parser.add_argument("--solver-iterations", type=int, default=50)
     parser.add_argument("--solver-tolerance", type=float, default=1e-6)
@@ -899,7 +901,7 @@ def main():
         # ── [5] Full episode collection with chosen offset ────────────────────
         stage(f"5/6  数据采集 ep {ep}")
 
-        reset_scene(cube_pos, settle_steps=30)
+        reset_scene(cube_pos, settle_steps=args.settle_steps)
 
         trajectory, labels = build_trajectory_chained_ik(
             cube_pos,
@@ -911,7 +913,7 @@ def main():
         )
 
         # The verbose diagnostic above moves the robot/cube — reset before the actual episode
-        reset_scene(cube_pos, settle_steps=30)
+        reset_scene(cube_pos, settle_steps=args.settle_steps)
 
         ep_data = {
             "observation.state": [],

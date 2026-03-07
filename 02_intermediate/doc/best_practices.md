@@ -336,30 +336,60 @@ E41/E42/E44 的 close 阶段 debug PNGs 清楚显示：jaw mesh 尖端远低于 
 所以接下来最值得做的，是基于 `E47/E48` 的设置去调整 `offset_x/offset_y`，让 box 真正进入 pinch corridor。
 
 
-### 9.6 基于 `E48` 的 collision 对照实验
+## 基线（E48）
 
-`E48` 已经达到了"jaw 和 box 在 close 阶段持续接触"的前提条件，因此直接以它为基线研究 collision/contact 问题。
+后续所有实验以 E48 为基线。已通过 `E48_repro2` 确认当前 git 版本的脚本可以完整复现。
 
-基线设置（与 `E48` 完全一致）：
+> **`--auto-tune-offset` 不能省略。** 实测确认：同一 offset，开 auto-tune（TCP err=0.1mm, delta_z=0.0020）和不开（TCP err=4.2mm, delta_z=0.0003）结果完全不同。auto-tune 的 25 组 trial 会"预热" Genesis scene 内部状态，影响后续 episode 的物理轨迹。这是已知的 Genesis 行为，不是脚本 bug。基线必须保留 `--auto-tune-offset`，所有对照组也必须保留。
 
-- `xml = so101_new_calib_v3.xml`
-- `open=15`、`close=-10`、`close_hold_steps=50`
-- `approach_z=0.012`
-- `cube_fixed = [0.16, 0.0, 0.015]`
-- `offset = [0.008, -0.004, -0.01]`
+**TODO**
 
-collision 对照分组：
+### 脚本
 
-- `C54`: 基线复现（与 `E48` 参数一致）
-- `C55`: 仅改 `frictionloss=0`（使用 `so101_new_calib_v3_nofrictionloss.xml`）
-- `C56`: solver 强化（`implicitfast`, `substeps=8`, `iterations=100`, `noslip=10`, `timeconst=0.005`）
+`02_intermediate/scripts/3_grasp_experiment.py`（当前 git HEAD d6c7b63）
 
-判断标准：
+### XML
 
-1. `close` 阶段 box 是否仍保持持续 jaw-box 接触（与 `E48` 一致）
-2. 在持续接触的前提下，压入/疑似穿透是否明显减轻
+`02_intermediate/scripts/assets/so101_new_calib_v3.xml`
+
+- `grasp_center` pos = `[0.0093, -0.0065, -0.0942]`（v3 标定）
+- `frictionloss` = 默认（`0.1` / `0.052`）
+- 各版本 XML 说明见 `02_intermediate/scripts/assets/README.md`
+
+### 命令
+
+```bash
+python -u 3_grasp_experiment.py \
+  --xml so101_new_calib_v3.xml \
+  --episodes 1 --episode-length 8 \
+  --approach-z 0.012 \
+  --gripper-open 15 --gripper-close -10 \
+  --close-hold-steps 50 \
+  --cube-fixed-x 0.16 --cube-fixed-y 0.0 \
+  --auto-tune-offset \
+  --offset-x-candidates=-0.008,-0.004,0.0,0.004,0.008 \
+  --offset-y-candidates=-0.008,-0.004,0.0,0.004,0.008 \
+  --offset-z-candidates=-0.010 \
+  --export-close-debug-pngs --debug-close-context 30 \
+  --png-only
+```
+
+### 关键参数
+
+| 参数 | 值 |
+|------|-----|
+| xml | `so101_new_calib_v3.xml` |
+| open | 15 |
+| close | -10 |
+| close_hold_steps | 50 |
+| approach_z | 0.012 |
+| cube_fixed | `[0.16, 0.0, 0.015]` |
+| auto-tune offset 网格 | x: `[-0.008, -0.004, 0, 0.004, 0.008]`, y: 同, z: `[-0.01]` |
+| auto-tune 选出的 offset | `[0.008, -0.004, -0.01]` |
+| dense PNG 范围 | close 前后各 30 帧 |
 
 
+---
 
 ## 10. 穿透问题的物理仿真因素
 
@@ -431,3 +461,28 @@ for each episode:
 - 如果实验间需要做公平对照，所有组要么都开 auto-tune（走相同的 trial 历史），要么都不开
 - 不能用"开了 auto-tune 的实验"和"没开 auto-tune 的实验"直接对比 dense PNG
 - 长期应修复 `reset_scene()` 使其完全清除 solver 内部状态，或在每次 trial/episode 前重建 scene
+
+### warm-up 排查实验
+
+目标：搞清楚 auto-tune 的 25 组 trial 到底改变了什么，能否用更简单的方式替代。
+
+已有对照：
+
+| 实验 | auto-tune | TCP err | delta_z |
+|------|-----------|---------|---------|
+| E48_repro2 | 开（25 trials） | 0.1mm | 0.0020 |
+| E48_no_autotune | 关 | 4.2mm | 0.0003 |
+
+排查分组（不开 auto-tune，固定 offset `[0.008, -0.004, -0.01]`）：
+
+1. `W1_settle200`：`reset_scene(settle_steps=200)`，看是否 settle 步数不够导致 PD 没收敛
+2. `W1_settle500`：`reset_scene(settle_steps=500)`，进一步确认
+3. `W1_dummy_trials`：不跑 auto-tune，但在正式 episode 前做 25 次 `reset_scene() + 90 步空跑`（不做 IK，只 step），看是否单纯"多跑物理步"就能改善
+4. `W1_single_trial`：只跑 1 次 trial（用同一 offset），看是否 1 次就够
+
+判断标准：只看 TCP offset from target，是否能回到 0.1mm 级别。
+
+预期：
+- 如果 W1_settle500 就能改善 → 根因是 settle 步数不够，修 `reset_scene()` 即可
+- 如果 W1_dummy_trials 能改善但 settle500 不行 → 根因是 solver 需要经历"真实物理交互"才能 warm-up
+- 如果只有真正的 auto-tune trial 能改善 → warm-up 依赖于特定的 IK 轨迹执行历史，更难绕过
