@@ -225,6 +225,8 @@ auto_tune.best_offset, auto_tune.best_lift_delta, auto_tune.search_log
 | E36 - 37 | 独立 gripper 标定：扫 `-20,-10,0,10,20,30,40,50` 并导出 PNG | 已确认 **gripper 数值越大，夹爪张口越大**；之前把正值当"close"在物理上是错误的 |
 | E38-E41 | 固定 `E33` 的 pose/几何后，测试 `gripper_close=-20,-10,0` | 三者 episode 都约 `+0.0006m`；gripper_close 方向问题已经从"未知"变成"已知"，但抓取失败的主因仍然是 TCP 目标点没有把 box 放进 pinch 区域。|
 | E42-M1 | **XY 对齐问题确认**（见 9.4）：jaw 尖端可达 cube 高度，但 grasp_center XY 偏移导致 cube 在 jaw 外缘空抓；Z 方向可达（之前 body origin 测量误导） |
+| E45 | 固定 `v3 grasp_center` 后先试 `gripper_open=10` | 比 `open=0` 更接近"包裹 box"的方向；但仍然是一侧 jaw 先碰到 box，随后发生挤压/推移，说明开口方向是对的，但幅度还不够 |
+| E47-E49 | 继续验证 `open=15`、`open=15 + close=-10`、`open=15 + close=-10 + pre-close-steps=4` | `open=15` 已基本证明开口空间足够；当前更主要的问题是 `approach` 阶段的 `offset_x/offset_y` 仍让 box 偏在单侧 jaw 一边。`close=-10` 没有改变主导现象，`pre-close-steps=4` 也不再是当前优先方向 |
 
 ### 9.4 当前阻塞（E42–M1）
 
@@ -272,9 +274,7 @@ E41/E42/E44 的 close 阶段 debug PNGs 清楚显示：jaw mesh 尖端远低于 
 
 #### B. 推理分析
 
-**B1. Z 方向可达**
-
-**B2. 根因是 `grasp_center` 在 MJCF 中的挂载位置没有对准夹持中心点**
+**根因是 `grasp_center` 在 MJCF 中的挂载位置没有对准夹持中心点**
 
 > 术语：**夹持中心点（jaw pinch center）** = fixed jaw 和 moving jaw 闭合时，两个指尖之间的中心接触点。
 
@@ -290,17 +290,85 @@ E41/E42/E44 的 close 阶段 debug PNGs 清楚显示：jaw mesh 尖端远低于 
 简单说：**`grasp_center` 的定义位置歪了，不是 IK 的问题，也不是 Z 方向的问题。**
 如果把 `grasp_center` 的 local pos 修正到真实夹持中心点(jaw pinch center)的位置，IK 就能把两爪正确地送到 cube 两侧。
 
+### 9.5 固定 `v3 grasp_center` 后的后续实验（E45, E47-E49）
 
-#### 9.4.5 当前建议
+在 `v3 grasp_center` 固定后，这一轮调参的目标已经不是继续证明 TCP 对不对，而是看：
 
-> **核心问题是 grasp_center 的 XY 偏移未对准 jaw pinch center，导致空抓。Z 方向可达。**
+- cube 能不能在 `approach` 末期**进入两爪之间**
+- 左右 jaw 是否能形成更对称的**几何包裹**
+- `close` 前是否已经出现单侧提前接触和侧向推挤
 
-后续推荐方向（按优先级）：
+因此，这一段的判断应以**包裹几何质量**为主，`lift_delta` 只能作为次要结果，不能反过来主导结论。
 
-1. **标定 grasp_center → jaw pinch center 的 XY 偏移量**：在仿真中固定 cube 位置，用 `offset_x / offset_y` 的精细网格搜索（步长 1-2mm）找到让 cube 正好落入两爪中间的补偿值。搜索范围建议 `ox ∈ [-0.03, 0.03]`, `oy ∈ [-0.03, 0.03]`
-2. **修正 MJCF 中 `grasp_center` 的 pos**：根据标定结果，将 `grasp_center` body 的 pos 从当前值调整到实际 jaw pinch center 对应的 local offset
+#### A. 实验观察（事实）
 
----
+**观察 1：`open=10` 比 `open=0` 更接近正确方向**
+
+`E45` 的 dense PNG 显示：把 `gripper_open` 从 `0` 增加到 `10` 后，`approach` 阶段 jaw 对 box 的包裹趋势明显好于 `E42_v3`。这说明此前并不是"jaw 太开"，而是**jaw 还不够开**。
+
+但 `E45` 同时也显示：box 仍没有稳定进入两爪中间，依旧是一侧 jaw 先接触 box，随后发生挤压和侧向推移。
+
+**观察 2：`open=15` 已经基本提供了足够的爪间空隙**
+
+`E47` 相比 `E45` 显示：从 `open=10` 增加到 `open=15` 后，`approach` 阶段的 jaw 开口已经基本足以容纳 box 进入两爪之间。
+
+但从 `ep00_f057_approach.png` 这类帧看，box 仍然没有落在两爪的中线附近，而是明显更贴近其中一侧 jaw。也就是说，当前主矛盾不再是"开口够不够大"，而是 **`approach` 阶段的 XY 放置仍有系统偏差**。
+
+**观察 3：`open=15 + close=-10` 说明 close 过程中确实能形成一段"已夹住"的瞬间**
+
+`E48` 中可以看到，close 初段 box 一度已经进入两爪之间，说明 `open=15` 配合较温和的 `close=-10`，已经足以让 jaw 在几何上形成夹持。
+
+但随后 box 很快出现不符合直觉的穿透/穿入现象。这表明：
+
+- `gripper_close` 会直接决定 jaw 继续向内压的目标角度
+- 但"碰到 box 后能否被稳定挡住"并不只由 `gripper_close` 决定，还受 collision/contact 建模影响
+
+
+#### B. 推理分析
+
+**当前第一优先级不是继续放大 `open`，而是修正 `offset_x/offset_y`**
+
+在 `open=15` 下，爪间空隙已经基本足够。当前更像是 box 在 `approach` 阶段被送到了两爪中线的旁边，而不是中线本身。
+
+所以接下来最值得做的，是基于 `E47/E48` 的设置去调整 `offset_x/offset_y`，让 box 真正进入 pinch corridor。
+
+
+### 9.6 基于 `E48` 的 collision 对照实验
+
+`E48` 已经达到了"jaw 和 box 在 close 阶段持续接触"的前提条件，因此直接以它为基线研究 collision/contact 问题。
+
+基线设置（与 `E48` 完全一致）：
+
+- `xml = so101_new_calib_v3.xml`
+- `open=15`、`close=-10`、`close_hold_steps=50`
+- `approach_z=0.012`
+- `cube_fixed = [0.16, 0.0, 0.015]`
+- `offset = [0.008, -0.004, -0.01]`
+
+collision 对照分组：
+
+- `C54`: 基线复现（与 `E48` 参数一致）
+- `C55`: 仅改 `frictionloss=0`（使用 `so101_new_calib_v3_nofrictionloss.xml`）
+- `C56`: solver 强化（`implicitfast`, `substeps=8`, `iterations=100`, `noslip=10`, `timeconst=0.005`）
+
+判断标准：
+
+1. `close` 阶段 box 是否仍保持持续 jaw-box 接触（与 `E48` 一致）
+2. 在持续接触的前提下，压入/疑似穿透是否明显减轻
 
 
 
+## 10. 穿透问题的物理仿真因素
+
+
+后续如果要继续研究穿透，建议顺序是：
+
+3. 先改 jaw/cube 的 collision geom，使接触面更规则
+4. 再给 jaw/cube 显式加 `friction`、`solref`、`solimp`
+5. 最后再做 Genesis solver 侧对照：
+   - 增大 `substeps`
+   - 打开 `noslip_iterations`
+   - 显式切到 `implicitfast`
+   - 诊断性地试 `use_gjk_collision=True`
+
+简单说，当前问题已经从"动作学没调好"切换成了"接触建模还不够可信"。
