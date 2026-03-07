@@ -459,8 +459,17 @@ docker run --rm \
 | `6_oriented_grasp_test.py` | gripper link + 朝向约束 IK | metrics.json + debug PNGs |
 | `7_minimal_grasp.py` | 最小化 trial 一致性测试（N 次独立重复） | metrics.json + success rate |
 
-### 9.7 结论
+### 9.7 结论（已修正，基于 debug PNG 复查）
 
-> **当前 SO-101 MJCF 无法实现桌面级 top-down pinch grasp**。核心阻塞是 `gripperframe` site 位置定义错误（TCP 比 jaw 低 8cm）和手臂工作空间限制（jaw 无法下探到 z<0.07m）。这不是调参问题，需要在 MJCF 模型层面修复。
+> **之前"z 方向不可达"的结论是错误的。** `diag_gc_sweep.py` 测量的 `jaw_mid_z`
+> 是 link body origin 中点，不是 jaw mesh tip。实际 jaw 尖端可以到达 cube 高度。
+
+回看 E41/E42/E44 的 close 阶段 debug PNGs，确认：
+
+1. **Z 高度没有问题** — jaw 尖端确实触碰到了 cube
+2. **XY 偏移是真正根因** — cube 一直在 fixed jaw 的外侧边缘，没有进入两爪之间的 pinch 区域
+3. 夹爪在 cube 旁边"空抓"，close 时只是擦边推动 cube
+
+**真正的阻塞是 `grasp_center` 的 XY 偏移未对准 jaw pinch center。** 修复方向：通过精细 XY offset 网格搜索（步长 1-2mm）找到正确的补偿值，然后修正 MJCF 中 `grasp_center` 的 pos。
 
 详细建议见 `best_practices.md` 9.4.5 节。
