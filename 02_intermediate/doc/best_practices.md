@@ -223,7 +223,7 @@ auto_tune.best_offset, auto_tune.best_lift_delta, auto_tune.search_log
 | E30 | 双侧斜视角 + 中间稳区采样 + auto-tune-offset | 跟新camera pose 方便debug |
 | E36 - 37 | 独立 gripper 标定：扫 `-20,-10,0,10,20,30,40,50` 并导出 PNG | 已确认 **gripper 数值越大，夹爪张口越大**；之前把正值当"close"在物理上是错误的 |
 | E38-E41 | 固定 `E33` 的 pose/几何后，测试 `gripper_close=-20,-10,0` | 三者 episode 都约 `+0.0006m`；gripper_close 方向问题已经从"未知"变成"已知"，但抓取失败的主因仍然是 TCP 目标点没有把 box 放进 pinch 区域。|
-| E42-M1 | **结构性阻塞确认**（见 9.4）：grasp_center 定义偏差 + 工作空间不可达 |
+| E42-M1 | **XY 对齐问题确认**（见 9.4）：jaw 尖端可达 cube 高度，但 grasp_center XY 偏移导致 cube 在 jaw 外缘空抓；Z 方向可达（之前 body origin 测量误导） |
 
 ### 9.4 当前阻塞与分析（E42–M1, 2026-03-06, 已修正）
 
