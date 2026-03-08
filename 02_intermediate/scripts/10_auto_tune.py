@@ -99,7 +99,7 @@ def main():
     p.add_argument("--exp-id", default="T1")
     p.add_argument("--save", default="/output")
     p.add_argument("--fps", type=int, default=30)
-    p.add_argument("--gripper-open", type=float, default=15.0)
+    p.add_argument("--gripper-open", type=float, default=30.0)
     p.add_argument("--gripper-close", type=float, default=-10.0)
     p.add_argument("--approach-z", type=float, default=0.012)
     p.add_argument("--cube-x", type=float, default=0.16)
@@ -163,9 +163,7 @@ def main():
     for _ in range(60):
         scene.step()
 
-    ee_link = so101.get_link("grasp_center")
-    moving_jaw_link = so101.get_link("moving_jaw_so101_v1")
-    gripper_link = so101.get_link("gripper")
+    ee_link = so101.get_link("grasp_center")  # IK target = grasp_center
 
     def solve_ik(pos, grip_deg, seed_rad=None):
         if seed_rad is None:
@@ -236,7 +234,7 @@ def main():
         approach_frames = []
         z_before = None
         z_after = None
-        jaw_mid_at_approach = None
+        gc_pos_at_approach = None
         cube_pos_at_approach = None
 
         approach_indices = [i for i, ph in enumerate(phases) if ph == "approach"]
@@ -258,9 +256,7 @@ def main():
                                 (fi + 1 >= len(phases) or phases[fi + 1] != "approach"))
             if is_approach_last:
                 cube_pos_at_approach = to_numpy(cube.get_pos())
-                mj_pos = to_numpy(moving_jaw_link.get_pos())
-                gr_pos = to_numpy(gripper_link.get_pos())
-                jaw_mid_at_approach = (mj_pos + gr_pos) / 2.0
+                gc_pos_at_approach = to_numpy(ee_link.get_pos())
 
             if phase == "close" and z_before is None:
                 z_before = z_now
@@ -274,8 +270,8 @@ def main():
 
         delta_z = z_after - z_before
 
-        if cube_pos_at_approach is not None and jaw_mid_at_approach is not None:
-            diff_xy = jaw_mid_at_approach[:2] - cube_pos_at_approach[:2]
+        if cube_pos_at_approach is not None and gc_pos_at_approach is not None:
+            diff_xy = gc_pos_at_approach[:2] - cube_pos_at_approach[:2]
             centering_xy = float(np.linalg.norm(diff_xy))
             approach_contact = float(np.linalg.norm(cube_pos_at_approach - cube_init))
         else:
