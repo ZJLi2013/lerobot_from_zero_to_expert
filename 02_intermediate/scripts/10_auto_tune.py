@@ -233,11 +233,14 @@ def main():
         traj += [q_close[:] for _ in range(n_hold)]
         phases += ["close_hold"] * n_hold
 
-        approach_img = None
+        approach_frames = []
         z_before = None
         z_after = None
         jaw_mid_at_approach = None
         cube_pos_at_approach = None
+
+        approach_indices = [i for i, ph in enumerate(phases) if ph == "approach"]
+        approach_last10 = set(approach_indices[-10:]) if len(approach_indices) >= 10 else set(approach_indices)
 
         for fi, (target_deg, phase) in enumerate(zip(traj, phases)):
             target_rad = np.deg2rad(np.array(target_deg, dtype=np.float32))
@@ -246,12 +249,14 @@ def main():
 
             z_now = float(to_numpy(cube.get_pos())[2])
 
+            if fi in approach_last10:
+                up_img = render_camera(cam_up)
+                side_img = render_camera(cam_side)
+                approach_frames.append((fi, np.concatenate([up_img, side_img], axis=1)))
+
             is_approach_last = (phase == "approach" and
                                 (fi + 1 >= len(phases) or phases[fi + 1] != "approach"))
             if is_approach_last:
-                up_img = render_camera(cam_up)
-                side_img = render_camera(cam_side)
-                approach_img = np.concatenate([up_img, side_img], axis=1)
                 cube_pos_at_approach = to_numpy(cube.get_pos())
                 mj_pos = to_numpy(moving_jaw_link.get_pos())
                 gr_pos = to_numpy(gripper_link.get_pos())
@@ -281,7 +286,7 @@ def main():
             "delta_z": delta_z,
             "centering_xy": centering_xy,
             "approach_contact": approach_contact,
-            "approach_img": approach_img,
+            "approach_frames": approach_frames,
         }
 
     # --- Run grid ---
@@ -322,9 +327,9 @@ def main():
                     f"{r['approach_contact']:.5f}  {flag_str}"
                 )
 
-                if r["approach_img"] is not None:
-                    save_png(r["approach_img"],
-                             png_dir / f"ox{ox:+.3f}_oy{oy:+.3f}_oz{oz:+.3f}.png")
+                for frame_idx, img in r["approach_frames"]:
+                    save_png(img,
+                             png_dir / f"ox{ox:+.3f}_oy{oy:+.3f}_oz{oz:+.3f}_f{frame_idx:03d}.png")
 
                 results.append({
                     "ox": ox, "oy": oy, "oz": oz,
