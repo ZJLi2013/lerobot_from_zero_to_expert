@@ -252,6 +252,11 @@ def main():
         help="Physics steps to settle after reset_scene before episode",
     )
     parser.add_argument(
+        "--force-offset",
+        action="store_true",
+        help="Run auto-tune for warm-up but use --grasp-offset-x/y/z for the final episode",
+    )
+    parser.add_argument(
         "--sim-dt",
         type=float,
         default=None,
@@ -859,10 +864,11 @@ def main():
         print(f"  cube pos = [{cube_pos[0]:.4f}, {cube_pos[1]:.4f}, {cube_pos[2]:.4f}]")
 
         # Optional auto-tune offset (grid search over x/y/z)
-        chosen_offset = np.array(
+        manual_offset = np.array(
             [args.grasp_offset_x, args.grasp_offset_y, args.grasp_offset_z],
             dtype=np.float64,
         )
+        chosen_offset = manual_offset.copy()
         if args.auto_tune_offset:
             x_cands = parse_csv_floats(args.offset_x_candidates)
             y_cands = parse_csv_floats(args.offset_y_candidates)
@@ -907,6 +913,17 @@ def main():
                 f"  offset = ({chosen_offset[0]:+.3f}, {chosen_offset[1]:+.3f}, {chosen_offset[2]:+.3f})"
             )
             metrics["auto_tune"] = {"enabled": False}
+
+        if args.force_offset:
+            chosen_offset[:] = manual_offset
+            print(
+                "  force offset after warm-up = "
+                f"({chosen_offset[0]:+.3f}, {chosen_offset[1]:+.3f}, {chosen_offset[2]:+.3f})"
+            )
+            metrics["auto_tune"]["force_offset"] = True
+            metrics["auto_tune"]["forced_offset"] = [float(v) for v in chosen_offset]
+        else:
+            metrics["auto_tune"]["force_offset"] = False
 
         metrics["selected_grasp_offset"] = [float(v) for v in chosen_offset]
 
