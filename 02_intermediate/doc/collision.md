@@ -119,10 +119,87 @@ Genesis/MJCF 里，每个 body 可以同时有两种 geom：
   - 因此 collision box 既没挡住 cube（没产生夹持力），也没产生 raw mesh 那种不稳定侧向推力
   - box primitive 方向是对的（不再挤走），但需要调准位置才能真正夹住
 
-### 下一步
+---
 
-把 collision box 的 pos/size 调到真正覆盖 jaw 内侧夹持面：
+### C58 — cube surface friction=1.5（失败）
 
-1. 从 visual mesh 顶点数据读出 jaw 内侧面的实际位置范围
-2. 或用 Genesis geom 可视化（`group=3`）直接看 collision box 位置
-3. 迭代调整直到 collision box 和 visual jaw 内侧面大致重合
+- 配置：同 C54b，加 `--cube-friction 1.5`
+- 结果：Genesis `gs.surfaces.Default` 不接受 `friction` 参数，报错退出
+- 原因：Genesis 的 surface 只管渲染，物理 friction 需要通过 MJCF geom 属性设置
+- 结论：GPT 给的 API 是错的。如果要改 cube friction，需要把 cube 定义成 MJCF entity 而不是 `morphs.Box`
+
+### C59 — dt=0.002（无效）
+
+- 配置：同 C54b，加 `--sim-dt 0.002`
+- 结果：机械臂完全没到 box 附近，所有 trial delta_z=0.0000
+- 原因：dt 从 0.033 降到 0.002，但轨迹步数仍按 `episode_length * fps = 240` 算。每步物理时间缩短 16 倍，8 秒内机械臂走不完轨迹
+- Genesis 还警告：dt<2ms 在 `use_gjk_collision=False` 下可能数值不稳定
+- 结论：不能只改 dt 不改轨迹步数。GPT 建议的 dt=0.002 需要同时大幅增加轨迹步数，当前脚本结构不支持
+
+---
+
+### C58b — cube friction=1.5（raw mesh + `gs.materials.Rigid`）
+
+- 配置：`so101_new_calib_v3.xml`（raw mesh collision），`--cube-friction 1.5`
+- auto-tune best offset：`[0.008, -0.004, -0.01]`
+- 现象：close 阶段仍有穿透和挤走，但 delta_z 从 C54b 的 0.0020 提到 0.0034
+- 结论：friction 单独有一定改善，但不能解决 raw mesh collision 的根本问题
+
+### C60 — jawbox v2 + friction + box_box_detection（重要进展）
+
+- 配置：`so101_new_calib_v3_jawbox.xml`（collision box 位置从 STL mesh 分析校准）+ `--cube-friction 1.5` + `box_box_detection=True`
+- auto-tune best offset：`[0.004, 0.004, -0.01]`
+- 现象：
+  - close 阶段 box 被明显倾斜/推倒 — 首次看到 collision geom 产生可见接触力
+  - close_hold 阶段 box 留在 jaw 附近，没被挤走
+  - lift 阶段 box 没被夹起（掉了）
+  - `before z = 0.0078`（close 时 box 被压到初始高度的一半），delta_z = 0.0069
+- 结论：jawbox + friction + box_box_detection 组合是目前最有效的配置。接触力方向正确，但夹持力还不足以 lift
+
+### C61 — C60 + GJK collision
+
+- 配置：同 C60，加 `--use-gjk-collision`
+- auto-tune best offset：`[0.004, 0.004, -0.01]`
+- 现象：与 C60 基本一致，delta_z = 0.0070
+- 结论：GJK vs MPR 在当前配置下几乎无差别，碰撞检测算法不是瓶颈
+
+---
+
+### 实验汇总
+
+| 实验 | jaw geom | friction | box_box | GJK | delta_z |
+|------|----------|----------|---------|-----|---------|
+| C54b | raw mesh | 默认 | 否 | 否 | 0.0020 |
+| C58b | raw mesh | 1.5 | 是 | 否 | 0.0034 |
+| C60 | box prim | 1.5 | 是 | 否 | 0.0069 |
+| C61 | box prim | 1.5 | 是 | 是 | 0.0070 |
+
+---
+
+## 6. 动作参数调优（基于 C60 collision 配置）
+
+固定 collision 配置：`v3_jawbox.xml` + `--cube-friction 1.5` + `box_box_detection=True`
+
+目标：让 approach 末帧 box 处于两爪较中间的位置。
+
+判断标准：只看 approach last frame 的 dense PNG，box 是否在两个 jaw 之间，而不是贴在单侧。
+
+实验设计：
+
+固定 C60 collision 配置 + `open=20, close=-20, approach_z=0.012`，不开 auto-tune，手动指定 offset，逐组看 approach 末帧。
+
+offset_z 固定 `-0.01`，扫 x/y 的 3x3 网格（围绕 auto-tune 选出的 `[0.004, 0.004]`）：
+
+| 组 | offset_x | offset_y |
+|----|----------|----------|
+| A1 | 0.000 | 0.000 |
+| A2 | 0.000 | 0.004 |
+| A3 | 0.000 | 0.008 |
+| A4 | 0.004 | 0.000 |
+| A5 | 0.004 | 0.004 |
+| A6 | 0.004 | 0.008 |
+| A7 | 0.008 | 0.000 |
+| A8 | 0.008 | 0.004 |
+| A9 | 0.008 | 0.008 |
+
+注意：不开 auto-tune 时需要处理 Genesis warm-up 问题（见 best_practices.md）。可能需要先跑一轮 auto-tune warm-up 然后在同一 scene 里按固定 offset 跑，或者接受 warm-up 差异只做相对对比。
