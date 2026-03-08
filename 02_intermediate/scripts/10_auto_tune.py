@@ -1,12 +1,14 @@
 """
-SO-101 offset auto-tune with approach visualization.
+SO-101 offset auto-tune with multiple metrics.
 
-Runs a grid of offset candidates, captures approach-end frame for each,
-and selects best offset by either delta_z or approach centering.
+Metrics:
+  - delta_z: close_hold z - close_start z (legacy, for backward compat)
+  - centering_error: 3D distance from jaw midpoint to cube center at approach end
+  - approach_contact: cube displacement from init at approach end (should be ~0)
 
 Usage:
   python 10_auto_tune.py --xml assets/so101_new_calib_v3_jawbox.xml \
-      --cube-friction 1.5 --save /output --exp-id T1_centering
+      --cube-friction 1.5 --save /output --exp-id T2
 """
 
 import argparse
@@ -67,7 +69,8 @@ def find_xml(user_path):
         p = Path(user_path)
         if p.exists():
             return p
-    for c in [Path("assets/so101_new_calib.xml"), Path("02_intermediate/scripts/assets/so101_new_calib.xml")]:
+    for c in [Path("assets/so101_new_calib.xml"),
+              Path("02_intermediate/scripts/assets/so101_new_calib.xml")]:
         if c.exists():
             return c
     try:
@@ -82,7 +85,8 @@ def find_xml(user_path):
     return None
 
 
-JOINT_NAMES = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper"]
+JOINT_NAMES = ["shoulder_pan", "shoulder_lift", "elbow_flex",
+               "wrist_flex", "wrist_roll", "gripper"]
 HOME_DEG = np.array([0.0, -30.0, 90.0, -60.0, 0.0, 0.0], dtype=np.float32)
 IK_QUAT_DOWN = np.array([0.0, 1.0, 0.0, 0.0])
 
@@ -90,7 +94,7 @@ IK_QUAT_DOWN = np.array([0.0, 1.0, 0.0, 0.0])
 def main():
     ensure_display()
 
-    p = argparse.ArgumentParser(description="SO-101 offset auto-tune with approach visualization")
+    p = argparse.ArgumentParser(description="SO-101 offset auto-tune")
     p.add_argument("--xml", default=None)
     p.add_argument("--exp-id", default="T1")
     p.add_argument("--save", default="/output")
@@ -107,6 +111,8 @@ def main():
     p.add_argument("--z-candidates", default="-0.010")
     p.add_argument("--cpu", action="store_true")
     p.add_argument("--trial-steps", type=int, default=90)
+    p.add_argument("--contact-threshold", type=float, default=0.003,
+                   help="Max cube displacement (m) to consider approach 'clean'")
     args = p.parse_args()
 
     xml_path = find_xml(args.xml)
@@ -130,7 +136,8 @@ def main():
     scene.add_entity(gs.morphs.Plane())
 
     cube_kw = dict(
-        morph=gs.morphs.Box(size=(0.03, 0.03, 0.03), pos=(args.cube_x, args.cube_y, args.cube_z)),
+        morph=gs.morphs.Box(size=(0.03, 0.03, 0.03),
+                            pos=(args.cube_x, args.cube_y, args.cube_z)),
         surface=gs.surfaces.Default(color=(1.0, 0.3, 0.3, 1.0)),
     )
     if args.cube_friction is not None:
@@ -139,8 +146,10 @@ def main():
     cube = scene.add_entity(**cube_kw)
     so101 = scene.add_entity(gs.morphs.MJCF(file=str(xml_path), pos=(0, 0, 0)))
 
-    cam_up = scene.add_camera(res=(640, 480), pos=(0.42, 0.34, 0.26), lookat=(0.15, 0.0, 0.08), fov=38, GUI=False)
-    cam_side = scene.add_camera(res=(640, 480), pos=(0.5, -0.4, 0.3), lookat=(0.15, 0.0, 0.1), fov=45, GUI=False)
+    cam_up = scene.add_camera(res=(640, 480), pos=(0.42, 0.34, 0.26),
+                              lookat=(0.15, 0.0, 0.08), fov=38, GUI=False)
+    cam_side = scene.add_camera(res=(640, 480), pos=(0.5, -0.4, 0.3),
+                                lookat=(0.15, 0.0, 0.1), fov=45, GUI=False)
     scene.build()
 
     home_rad = np.deg2rad(HOME_DEG)
@@ -155,6 +164,8 @@ def main():
         scene.step()
 
     ee_link = so101.get_link("grasp_center")
+    moving_jaw_link = so101.get_link("moving_jaw_so101_v1")
+    gripper_link = so101.get_link("gripper")
 
     def solve_ik(pos, grip_deg, seed_rad=None):
         if seed_rad is None:
@@ -172,24 +183,23 @@ def main():
         a, b = np.array(a), np.array(b)
         return [a + (b - a) * (i + 1) / max(n, 1) for i in range(n)]
 
-    def reset_scene(cube_pos, settle=30):
+    def reset_scene(cpos, settle=30):
         so101.set_qpos(home_rad)
         so101.control_dofs_position(home_rad, dof_idx)
         so101.zero_all_dofs_velocity()
-        cube.set_pos(torch.tensor(cube_pos, dtype=torch.float32, device=gs.device).unsqueeze(0))
+        cube.set_pos(torch.tensor(cpos, dtype=torch.float32, device=gs.device).unsqueeze(0))
         cube.set_quat(torch.tensor([1, 0, 0, 0], dtype=torch.float32, device=gs.device).unsqueeze(0))
         cube.zero_all_dofs_velocity()
         for _ in range(settle):
             scene.step()
 
-    cube_pos = np.array([args.cube_x, args.cube_y, args.cube_z])
+    cube_init = np.array([args.cube_x, args.cube_y, args.cube_z])
 
-    def run_trial_with_snapshot(ox, oy, oz):
-        """Run trial, capture approach-end frame, return (delta_z, approach_img)."""
-        reset_scene(cube_pos, settle=20)
+    def run_trial(ox, oy, oz):
+        reset_scene(cube_init, settle=20)
 
         off = np.array([ox, oy, oz])
-        pos_pre = cube_pos + off + np.array([0, 0, 0.10])
+        pos_pre = cube_init + off + np.array([0, 0, 0.10])
 
         q_pre = solve_ik(pos_pre, args.gripper_open, seed_rad=home_rad)
         prev_rad = np.deg2rad(np.array(q_pre, dtype=np.float32))
@@ -197,7 +207,7 @@ def main():
         for i in range(6):
             frac = (i + 1) / 6
             z = 0.10 + (args.approach_z - 0.10) * frac
-            pos = cube_pos + off + np.array([0, 0, z])
+            pos = cube_init + off + np.array([0, 0, z])
             wp = solve_ik(pos, args.gripper_open, seed_rad=prev_rad)
             descent_wps.append(wp)
             prev_rad = np.deg2rad(np.array(wp, dtype=np.float32))
@@ -206,8 +216,7 @@ def main():
         q_close = q_approach.copy()
         q_close[5] = args.gripper_close
 
-        traj = []
-        phases = []
+        traj, phases = [], []
         n_move = max(15, args.trial_steps // 8)
         traj += lerp(HOME_DEG.tolist(), q_pre, n_move)
         phases += ["move_pre"] * n_move
@@ -227,7 +236,8 @@ def main():
         approach_img = None
         z_before = None
         z_after = None
-        cube_z_at_approach_end = None
+        jaw_mid_at_approach = None
+        cube_pos_at_approach = None
 
         for fi, (target_deg, phase) in enumerate(zip(traj, phases)):
             target_rad = np.deg2rad(np.array(target_deg, dtype=np.float32))
@@ -236,11 +246,16 @@ def main():
 
             z_now = float(to_numpy(cube.get_pos())[2])
 
-            if phase == "approach" and (fi + 1 >= len(phases) or phases[fi + 1] != "approach"):
+            is_approach_last = (phase == "approach" and
+                                (fi + 1 >= len(phases) or phases[fi + 1] != "approach"))
+            if is_approach_last:
                 up_img = render_camera(cam_up)
                 side_img = render_camera(cam_side)
                 approach_img = np.concatenate([up_img, side_img], axis=1)
-                cube_z_at_approach_end = z_now
+                cube_pos_at_approach = to_numpy(cube.get_pos())
+                mj_pos = to_numpy(moving_jaw_link.get_pos())
+                gr_pos = to_numpy(gripper_link.get_pos())
+                jaw_mid_at_approach = (mj_pos + gr_pos) / 2.0
 
             if phase == "close" and z_before is None:
                 z_before = z_now
@@ -253,15 +268,29 @@ def main():
             z_after = float(to_numpy(cube.get_pos())[2])
 
         delta_z = z_after - z_before
-        approach_delta = abs(cube_z_at_approach_end - args.cube_z) if cube_z_at_approach_end else 999
+
+        if cube_pos_at_approach is not None and jaw_mid_at_approach is not None:
+            diff = jaw_mid_at_approach - cube_pos_at_approach
+            centering_error = float(np.linalg.norm(diff))
+            centering_xy = float(np.linalg.norm(diff[:2]))
+            centering_z = float(diff[2])
+            approach_contact = float(np.linalg.norm(cube_pos_at_approach - cube_init))
+        else:
+            centering_error = 999.0
+            centering_xy = 999.0
+            centering_z = 999.0
+            approach_contact = 999.0
 
         return {
             "delta_z": delta_z,
-            "approach_delta": approach_delta,
+            "centering_error": centering_error,
+            "centering_xy": centering_xy,
+            "centering_z": centering_z,
+            "approach_contact": approach_contact,
             "approach_img": approach_img,
         }
 
-    # Run grid
+    # --- Run grid ---
     x_cands = parse_csv(args.x_candidates)
     y_cands = parse_csv(args.y_candidates)
     z_cands = parse_csv(args.z_candidates)
@@ -275,45 +304,76 @@ def main():
     tried = 0
 
     print(f"\nRunning {total} offset candidates...")
+    print(f"  {'#':>4}  {'ox':>7} {'oy':>7} {'oz':>7}  "
+          f"{'Δz':>8} {'center':>7} {'c_xy':>6} {'c_z':>7} {'contact':>8}  flags")
+    print(f"  {'─'*80}")
+
     for oz in z_cands:
         for ox in x_cands:
             for oy in y_cands:
                 tried += 1
-                r = run_trial_with_snapshot(ox, oy, oz)
+                r = run_trial(ox, oy, oz)
 
-                tag_dz = "★" if r["delta_z"] > 0.005 else " "
-                tag_ap = "●" if r["approach_delta"] < 0.002 else " "
+                clean = r["approach_contact"] < args.contact_threshold
+                flags = []
+                if r["delta_z"] > 0.005:
+                    flags.append("★dz")
+                if clean:
+                    flags.append("●clean")
+                flag_str = " ".join(flags) if flags else ""
+
                 print(
-                    f"  {tag_dz}{tag_ap} [{tried}/{total}] "
-                    f"ox={ox:+.3f} oy={oy:+.3f} oz={oz:+.3f} "
-                    f"→ Δz={r['delta_z']:+.4f}m  approach_Δ={r['approach_delta']:.4f}m"
+                    f"  {tried:4d}  {ox:+.3f} {oy:+.3f} {oz:+.3f}  "
+                    f"{r['delta_z']:+.4f} {r['centering_error']:.4f} "
+                    f"{r['centering_xy']:.4f} {r['centering_z']:+.4f} "
+                    f"{r['approach_contact']:.5f}  {flag_str}"
                 )
 
                 if r["approach_img"] is not None:
-                    fname = f"ox{ox:+.3f}_oy{oy:+.3f}_oz{oz:+.3f}.png"
-                    save_png(r["approach_img"], png_dir / fname)
+                    save_png(r["approach_img"],
+                             png_dir / f"ox{ox:+.3f}_oy{oy:+.3f}_oz{oz:+.3f}.png")
 
                 results.append({
                     "ox": ox, "oy": oy, "oz": oz,
                     "delta_z": float(r["delta_z"]),
-                    "approach_delta": float(r["approach_delta"]),
+                    "centering_error": float(r["centering_error"]),
+                    "centering_xy": float(r["centering_xy"]),
+                    "centering_z": float(r["centering_z"]),
+                    "approach_contact": float(r["approach_contact"]),
                 })
 
-    # Select best by delta_z
+    # --- Select best ---
     best_dz = max(results, key=lambda r: r["delta_z"])
-    # Select best by approach centering (smallest approach_delta = least cube disturbance)
-    best_ap = min(results, key=lambda r: r["approach_delta"])
 
-    print(f"\n{'═'*60}")
+    clean_results = [r for r in results if r["approach_contact"] < args.contact_threshold]
+    if clean_results:
+        best_center = min(clean_results, key=lambda r: r["centering_error"])
+    else:
+        print("  ⚠ No clean approach found, selecting from all")
+        best_center = min(results, key=lambda r: r["centering_error"])
+
+    print(f"\n{'═'*70}")
     print(f"  RESULTS — {args.exp_id}")
-    print(f"{'═'*60}")
-    print(f"  Best by delta_z:     ox={best_dz['ox']:+.3f} oy={best_dz['oy']:+.3f} oz={best_dz['oz']:+.3f}  Δz={best_dz['delta_z']:+.4f}m")
-    print(f"  Best by centering:   ox={best_ap['ox']:+.3f} oy={best_ap['oy']:+.3f} oz={best_ap['oz']:+.3f}  approach_Δ={best_ap['approach_delta']:.4f}m")
+    print(f"{'═'*70}")
+    print(f"  Best by delta_z:")
+    print(f"    offset=[{best_dz['ox']:+.3f}, {best_dz['oy']:+.3f}, {best_dz['oz']:+.3f}]")
+    print(f"    delta_z={best_dz['delta_z']:+.4f}m")
+    print(f"  Best by centering (clean approach only):")
+    print(f"    offset=[{best_center['ox']:+.3f}, {best_center['oy']:+.3f}, {best_center['oz']:+.3f}]")
+    print(f"    centering_error={best_center['centering_error']:.4f}m "
+          f"(xy={best_center['centering_xy']:.4f}, z={best_center['centering_z']:+.4f})")
+    print(f"    approach_contact={best_center['approach_contact']:.5f}m")
     print(f"  Approach PNGs: {png_dir}")
-    print(f"{'═'*60}\n")
+    print(f"  Clean candidates: {len(clean_results)}/{len(results)}")
+    print(f"{'═'*70}\n")
 
     with open(out_dir / "tune_results.json", "w") as f:
-        json.dump({"results": results, "best_delta_z": best_dz, "best_centering": best_ap}, f, indent=2)
+        json.dump({
+            "results": results,
+            "best_delta_z": best_dz,
+            "best_centering": best_center,
+            "contact_threshold": args.contact_threshold,
+        }, f, indent=2)
 
 
 if __name__ == "__main__":
