@@ -17,6 +17,7 @@ import os
 import subprocess
 import sys
 import time
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import numpy as np
@@ -62,6 +63,59 @@ def save_png(arr, path):
 
 def parse_csv(text):
     return [float(x.strip()) for x in text.split(",") if x.strip()]
+
+
+def parse_vec(text):
+    return np.array([float(x) for x in text.split()], dtype=np.float64)
+
+
+def quat_to_rotmat(quat_wxyz):
+    w, x, y, z = quat_wxyz
+    n = np.linalg.norm(quat_wxyz)
+    if n == 0:
+        return np.eye(3, dtype=np.float64)
+    w, x, y, z = quat_wxyz / n
+    return np.array([
+        [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+        [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+        [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+    ], dtype=np.float64)
+
+
+def transform_point(link_pos, link_quat, local_pos):
+    rot = quat_to_rotmat(link_quat)
+    return link_pos + rot @ local_pos
+
+
+def load_jaw_box_config(xml_path):
+    tree = ET.parse(xml_path)
+    root = tree.getroot()
+    worldbody = root.find("worldbody")
+    if worldbody is None:
+        raise RuntimeError("worldbody not found in XML")
+
+    jaw_boxes = {}
+
+    def walk_body(body):
+        body_name = body.attrib.get("name")
+        for geom in body.findall("geom"):
+            geom_name = geom.attrib.get("name")
+            if geom_name in {"fixed_jaw_box", "moving_jaw_box"}:
+                jaw_boxes[geom_name] = {
+                    "body_name": body_name,
+                    "pos": parse_vec(geom.attrib["pos"]),
+                    "size": parse_vec(geom.attrib["size"]),
+                }
+        for child in body.findall("body"):
+            walk_body(child)
+
+    for body in worldbody.findall("body"):
+        walk_body(body)
+
+    missing = {"fixed_jaw_box", "moving_jaw_box"} - set(jaw_boxes.keys())
+    if missing:
+        raise RuntimeError(f"jaw box geom not found in XML: {sorted(missing)}")
+    return jaw_boxes
 
 
 def find_xml(user_path):
@@ -119,6 +173,7 @@ def main():
     if not xml_path:
         print("XML not found"); sys.exit(1)
     print(f"XML: {xml_path}")
+    jaw_box_cfg = load_jaw_box_config(xml_path)
 
     import torch
     import genesis as gs
@@ -164,6 +219,67 @@ def main():
         scene.step()
 
     ee_link = so101.get_link("grasp_center")  # IK target = grasp_center
+    fixed_jaw_link = so101.get_link(jaw_box_cfg["fixed_jaw_box"]["body_name"])
+    moving_jaw_link = so101.get_link(jaw_box_cfg["moving_jaw_box"]["body_name"])
+    cube_half_extent = 0.03 / 2.0
+
+    def get_jaw_box_world(link, cfg):
+        link_pos = to_numpy(link.get_pos())
+        link_quat = to_numpy(link.get_quat())
+        center_world = transform_point(link_pos, link_quat, cfg["pos"])
+        rot = quat_to_rotmat(link_quat)
+        thickness_axis_local = np.zeros(3, dtype=np.float64)
+        thickness_axis_local[int(np.argmin(cfg["size"]))] = 1.0
+        thickness_axis_world = rot @ thickness_axis_local
+        thickness_axis_world = thickness_axis_world / np.linalg.norm(thickness_axis_world)
+        return {
+            "center_world": center_world,
+            "thickness_axis_world": thickness_axis_world,
+            "half_thickness": float(np.min(cfg["size"])),
+        }
+
+    def compute_jaw_metrics(cube_center_world):
+        fixed_box = get_jaw_box_world(fixed_jaw_link, jaw_box_cfg["fixed_jaw_box"])
+        moving_box = get_jaw_box_world(moving_jaw_link, jaw_box_cfg["moving_jaw_box"])
+        fixed_link_world = to_numpy(fixed_jaw_link.get_pos())
+        moving_link_world = to_numpy(moving_jaw_link.get_pos())
+
+        fixed_axis = fixed_box["thickness_axis_world"]
+        moving_axis = moving_box["thickness_axis_world"]
+        fixed_to_moving = moving_box["center_world"] - fixed_box["center_world"]
+        moving_to_fixed = fixed_box["center_world"] - moving_box["center_world"]
+
+        fixed_inward = fixed_axis * np.sign(np.dot(fixed_to_moving, fixed_axis) or 1.0)
+        moving_inward = moving_axis * np.sign(np.dot(moving_to_fixed, moving_axis) or 1.0)
+
+        fixed_inner_surface = (
+            fixed_box["center_world"] + fixed_inward * fixed_box["half_thickness"]
+        )
+        moving_inner_surface = (
+            moving_box["center_world"] + moving_inward * moving_box["half_thickness"]
+        )
+
+        jaw_midpoint = 0.5 * (fixed_inner_surface + moving_inner_surface)
+        dist_to_fixed = float(np.dot(cube_center_world - fixed_inner_surface, fixed_inward))
+        dist_to_moving = float(np.dot(cube_center_world - moving_inner_surface, moving_inward))
+
+        return {
+            "centering_error": float(np.linalg.norm(cube_center_world - jaw_midpoint)),
+            "centering_xy": float(np.linalg.norm((cube_center_world - jaw_midpoint)[:2])),
+            "jaw_balance_error": float(abs(dist_to_fixed - dist_to_moving)),
+            "dist_to_fixed_jaw": dist_to_fixed,
+            "dist_to_moving_jaw": dist_to_moving,
+            "clearance_min": float(min(dist_to_fixed, dist_to_moving) - cube_half_extent),
+            "jaw_gap": float(np.linalg.norm(moving_inner_surface - fixed_inner_surface)),
+            "jaw_midpoint_world": jaw_midpoint.tolist(),
+            "fixed_jaw_link_world": fixed_link_world.tolist(),
+            "moving_jaw_link_world": moving_link_world.tolist(),
+            "fixed_jaw_surface_world": fixed_inner_surface.tolist(),
+            "moving_jaw_surface_world": moving_inner_surface.tolist(),
+            "fixed_jaw_box_center_world": fixed_box["center_world"].tolist(),
+            "moving_jaw_box_center_world": moving_box["center_world"].tolist(),
+            "cube_center_world": cube_center_world.tolist(),
+        }
 
     def solve_ik(pos, grip_deg, seed_rad=None):
         if seed_rad is None:
@@ -234,8 +350,8 @@ def main():
         approach_frames = []
         z_before = None
         z_after = None
-        gc_pos_at_approach = None
         cube_pos_at_approach = None
+        jaw_metrics_at_approach = None
 
         approach_indices = [i for i, ph in enumerate(phases) if ph == "approach"]
         approach_last10 = set(approach_indices[-10:]) if len(approach_indices) >= 10 else set(approach_indices)
@@ -256,7 +372,7 @@ def main():
                                 (fi + 1 >= len(phases) or phases[fi + 1] != "approach"))
             if is_approach_last:
                 cube_pos_at_approach = to_numpy(cube.get_pos())
-                gc_pos_at_approach = to_numpy(ee_link.get_pos())
+                jaw_metrics_at_approach = compute_jaw_metrics(cube_pos_at_approach)
 
             if phase == "close" and z_before is None:
                 z_before = z_now
@@ -270,19 +386,33 @@ def main():
 
         delta_z = z_after - z_before
 
-        if cube_pos_at_approach is not None and gc_pos_at_approach is not None:
-            diff_xy = gc_pos_at_approach[:2] - cube_pos_at_approach[:2]
-            centering_xy = float(np.linalg.norm(diff_xy))
+        if cube_pos_at_approach is not None and jaw_metrics_at_approach is not None:
             approach_contact = float(np.linalg.norm(cube_pos_at_approach - cube_init))
         else:
-            centering_xy = 999.0
             approach_contact = 999.0
+            jaw_metrics_at_approach = {
+                "centering_error": 999.0,
+                "centering_xy": 999.0,
+                "jaw_balance_error": 999.0,
+                "dist_to_fixed_jaw": -999.0,
+                "dist_to_moving_jaw": -999.0,
+                "clearance_min": -999.0,
+                "jaw_gap": -999.0,
+                "jaw_midpoint_world": [999.0, 999.0, 999.0],
+                "fixed_jaw_link_world": [999.0, 999.0, 999.0],
+                "moving_jaw_link_world": [999.0, 999.0, 999.0],
+                "fixed_jaw_surface_world": [999.0, 999.0, 999.0],
+                "moving_jaw_surface_world": [999.0, 999.0, 999.0],
+                "fixed_jaw_box_center_world": [999.0, 999.0, 999.0],
+                "moving_jaw_box_center_world": [999.0, 999.0, 999.0],
+                "cube_center_world": [999.0, 999.0, 999.0],
+            }
 
         return {
             "delta_z": delta_z,
-            "centering_xy": centering_xy,
             "approach_contact": approach_contact,
             "approach_frames": approach_frames,
+            **jaw_metrics_at_approach,
         }
 
     # --- Run grid ---
@@ -299,9 +429,12 @@ def main():
     tried = 0
 
     print(f"\nRunning {total} offset candidates...")
-    print(f"  {'#':>4}  {'ox':>7} {'oy':>7} {'oz':>7}  "
-          f"{'Δz':>8} {'c_xy':>7} {'contact':>8}  flags")
-    print(f"  {'─'*65}")
+    print(
+        f"  {'#':>4}  {'ox':>7} {'oy':>7} {'oz':>7}  "
+        f"{'ctr3d':>7} {'bal':>7} {'d_fix':>7} {'d_mov':>7} "
+        f"{'clr':>7} {'contact':>8}  flags"
+    )
+    print(f"  {'─'*100}")
 
     for oz in z_cands:
         for ox in x_cands:
@@ -315,11 +448,15 @@ def main():
                     flags.append("★dz")
                 if clean:
                     flags.append("●clean")
+                if r["clearance_min"] >= 0.0:
+                    flags.append("□clear")
                 flag_str = " ".join(flags) if flags else ""
 
                 print(
                     f"  {tried:4d}  {ox:+.3f} {oy:+.3f} {oz:+.3f}  "
-                    f"{r['delta_z']:+.4f} {r['centering_xy']:.4f} "
+                    f"{r['centering_error']:.4f} {r['jaw_balance_error']:.4f} "
+                    f"{r['dist_to_fixed_jaw']:.4f} {r['dist_to_moving_jaw']:.4f} "
+                    f"{r['clearance_min']:+.4f} "
                     f"{r['approach_contact']:.5f}  {flag_str}"
                 )
 
@@ -330,19 +467,37 @@ def main():
                 results.append({
                     "ox": ox, "oy": oy, "oz": oz,
                     "delta_z": float(r["delta_z"]),
+                    "centering_error": float(r["centering_error"]),
                     "centering_xy": float(r["centering_xy"]),
+                    "jaw_balance_error": float(r["jaw_balance_error"]),
+                    "dist_to_fixed_jaw": float(r["dist_to_fixed_jaw"]),
+                    "dist_to_moving_jaw": float(r["dist_to_moving_jaw"]),
+                    "clearance_min": float(r["clearance_min"]),
+                    "jaw_gap": float(r["jaw_gap"]),
                     "approach_contact": float(r["approach_contact"]),
+                    "jaw_midpoint_world": r["jaw_midpoint_world"],
+                    "fixed_jaw_link_world": r["fixed_jaw_link_world"],
+                    "moving_jaw_link_world": r["moving_jaw_link_world"],
+                    "fixed_jaw_surface_world": r["fixed_jaw_surface_world"],
+                    "moving_jaw_surface_world": r["moving_jaw_surface_world"],
+                    "fixed_jaw_box_center_world": r["fixed_jaw_box_center_world"],
+                    "moving_jaw_box_center_world": r["moving_jaw_box_center_world"],
+                    "cube_center_world": r["cube_center_world"],
                 })
 
     # --- Select best ---
     best_dz = max(results, key=lambda r: r["delta_z"])
 
     clean_results = [r for r in results if r["approach_contact"] < args.contact_threshold]
-    if clean_results:
-        best_center = min(clean_results, key=lambda r: r["centering_xy"])
+    clean_clear_results = [r for r in clean_results if r["clearance_min"] >= 0.0]
+    if clean_clear_results:
+        best_center = min(clean_clear_results, key=lambda r: r["centering_error"])
+    elif clean_results:
+        print("  Warning: no clean+clear candidate found, selecting from clean-only")
+        best_center = min(clean_results, key=lambda r: r["centering_error"])
     else:
-        print("  ⚠ No clean approach found, selecting from all")
-        best_center = min(results, key=lambda r: r["centering_xy"])
+        print("  Warning: no clean approach found, selecting from all")
+        best_center = min(results, key=lambda r: r["centering_error"])
 
     print(f"\n{'═'*70}")
     print(f"  RESULTS — {args.exp_id}")
@@ -350,12 +505,18 @@ def main():
     print(f"  Best by delta_z:")
     print(f"    offset=[{best_dz['ox']:+.3f}, {best_dz['oy']:+.3f}, {best_dz['oz']:+.3f}]")
     print(f"    delta_z={best_dz['delta_z']:+.4f}m")
-    print(f"  Best by centering_xy (clean approach only):")
+    print(f"  Best by jaw midpoint centering:")
     print(f"    offset=[{best_center['ox']:+.3f}, {best_center['oy']:+.3f}, {best_center['oz']:+.3f}]")
-    print(f"    centering_xy={best_center['centering_xy']:.4f}m")
+    print(f"    centering_error={best_center['centering_error']:.4f}m")
+    print(f"    jaw_balance_error={best_center['jaw_balance_error']:.4f}m")
+    print(f"    dist_to_fixed_jaw={best_center['dist_to_fixed_jaw']:.4f}m")
+    print(f"    dist_to_moving_jaw={best_center['dist_to_moving_jaw']:.4f}m")
+    print(f"    clearance_min={best_center['clearance_min']:+.4f}m")
+    print(f"    jaw_gap={best_center['jaw_gap']:.4f}m")
     print(f"    approach_contact={best_center['approach_contact']:.5f}m")
     print(f"  Approach PNGs: {png_dir}")
     print(f"  Clean candidates: {len(clean_results)}/{len(results)}")
+    print(f"  Clean+clear candidates: {len(clean_clear_results)}/{len(results)}")
     print(f"{'═'*70}\n")
 
     with open(out_dir / "tune_results.json", "w") as f:
@@ -364,6 +525,15 @@ def main():
             "best_delta_z": best_dz,
             "best_centering": best_center,
             "contact_threshold": args.contact_threshold,
+            "cube_half_extent": cube_half_extent,
+            "jaw_box_config": {
+                k: {
+                    "body_name": v["body_name"],
+                    "pos": v["pos"].tolist(),
+                    "size": v["size"].tolist(),
+                }
+                for k, v in jaw_box_cfg.items()
+            },
         }, f, indent=2)
 
 
