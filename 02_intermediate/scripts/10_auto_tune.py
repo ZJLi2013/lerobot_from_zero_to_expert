@@ -270,22 +270,16 @@ def main():
         delta_z = z_after - z_before
 
         if cube_pos_at_approach is not None and jaw_mid_at_approach is not None:
-            diff = jaw_mid_at_approach - cube_pos_at_approach
-            centering_error = float(np.linalg.norm(diff))
-            centering_xy = float(np.linalg.norm(diff[:2]))
-            centering_z = float(diff[2])
+            diff_xy = jaw_mid_at_approach[:2] - cube_pos_at_approach[:2]
+            centering_xy = float(np.linalg.norm(diff_xy))
             approach_contact = float(np.linalg.norm(cube_pos_at_approach - cube_init))
         else:
-            centering_error = 999.0
             centering_xy = 999.0
-            centering_z = 999.0
             approach_contact = 999.0
 
         return {
             "delta_z": delta_z,
-            "centering_error": centering_error,
             "centering_xy": centering_xy,
-            "centering_z": centering_z,
             "approach_contact": approach_contact,
             "approach_img": approach_img,
         }
@@ -305,8 +299,8 @@ def main():
 
     print(f"\nRunning {total} offset candidates...")
     print(f"  {'#':>4}  {'ox':>7} {'oy':>7} {'oz':>7}  "
-          f"{'Δz':>8} {'center':>7} {'c_xy':>6} {'c_z':>7} {'contact':>8}  flags")
-    print(f"  {'─'*80}")
+          f"{'Δz':>8} {'c_xy':>7} {'contact':>8}  flags")
+    print(f"  {'─'*65}")
 
     for oz in z_cands:
         for ox in x_cands:
@@ -324,8 +318,7 @@ def main():
 
                 print(
                     f"  {tried:4d}  {ox:+.3f} {oy:+.3f} {oz:+.3f}  "
-                    f"{r['delta_z']:+.4f} {r['centering_error']:.4f} "
-                    f"{r['centering_xy']:.4f} {r['centering_z']:+.4f} "
+                    f"{r['delta_z']:+.4f} {r['centering_xy']:.4f} "
                     f"{r['approach_contact']:.5f}  {flag_str}"
                 )
 
@@ -336,9 +329,7 @@ def main():
                 results.append({
                     "ox": ox, "oy": oy, "oz": oz,
                     "delta_z": float(r["delta_z"]),
-                    "centering_error": float(r["centering_error"]),
                     "centering_xy": float(r["centering_xy"]),
-                    "centering_z": float(r["centering_z"]),
                     "approach_contact": float(r["approach_contact"]),
                 })
 
@@ -347,10 +338,10 @@ def main():
 
     clean_results = [r for r in results if r["approach_contact"] < args.contact_threshold]
     if clean_results:
-        best_center = min(clean_results, key=lambda r: r["centering_error"])
+        best_center = min(clean_results, key=lambda r: r["centering_xy"])
     else:
         print("  ⚠ No clean approach found, selecting from all")
-        best_center = min(results, key=lambda r: r["centering_error"])
+        best_center = min(results, key=lambda r: r["centering_xy"])
 
     print(f"\n{'═'*70}")
     print(f"  RESULTS — {args.exp_id}")
@@ -358,10 +349,9 @@ def main():
     print(f"  Best by delta_z:")
     print(f"    offset=[{best_dz['ox']:+.3f}, {best_dz['oy']:+.3f}, {best_dz['oz']:+.3f}]")
     print(f"    delta_z={best_dz['delta_z']:+.4f}m")
-    print(f"  Best by centering (clean approach only):")
+    print(f"  Best by centering_xy (clean approach only):")
     print(f"    offset=[{best_center['ox']:+.3f}, {best_center['oy']:+.3f}, {best_center['oz']:+.3f}]")
-    print(f"    centering_error={best_center['centering_error']:.4f}m "
-          f"(xy={best_center['centering_xy']:.4f}, z={best_center['centering_z']:+.4f})")
+    print(f"    centering_xy={best_center['centering_xy']:.4f}m")
     print(f"    approach_contact={best_center['approach_contact']:.5f}m")
     print(f"  Approach PNGs: {png_dir}")
     print(f"  Clean candidates: {len(clean_results)}/{len(results)}")
