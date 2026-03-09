@@ -217,13 +217,27 @@ def project_point(point, bounds, dim_a, dim_b, width, height, pad=24):
     return (x, y)
 
 
-def draw_arrow(draw, p0, p1, color, width=3):
-    draw.line([p0, p1], fill=color, width=width)
+def draw_arrow(draw, p0, p1, color, width=3, dashed=False):
     dx = p1[0] - p0[0]
     dy = p1[1] - p0[1]
     norm = math.hypot(dx, dy)
     if norm < 1e-6:
         return
+    if dashed:
+        seg_on = 8
+        seg_off = 5
+        cycle = seg_on + seg_off
+        t = 0.0
+        while t < norm:
+            t_end = min(t + seg_on, norm)
+            sx = p0[0] + dx * t / norm
+            sy = p0[1] + dy * t / norm
+            ex = p0[0] + dx * t_end / norm
+            ey = p0[1] + dy * t_end / norm
+            draw.line([(sx, sy), (ex, ey)], fill=color, width=width)
+            t += cycle
+    else:
+        draw.line([p0, p1], fill=color, width=width)
     ux, uy = dx / norm, dy / norm
     left = (p1[0] - 10 * ux + 4 * uy, p1[1] - 10 * uy - 4 * ux)
     right = (p1[0] - 10 * ux - 4 * uy, p1[1] - 10 * uy + 4 * ux)
@@ -265,17 +279,17 @@ def draw_projection_panel(draw, origin_xy, size_xy, title, bounds, dim_a, dim_b,
     )
 
     current_colors = {"x": (220, 60, 60), "y": (60, 170, 60), "z": (60, 90, 220)}
-    rebuilt_colors = {"x": (255, 140, 0), "y": (160, 60, 220), "z": (0, 170, 170)}
+    rebuilt_colors = {"x": (220, 60, 60), "y": (60, 170, 60), "z": (60, 90, 220)}
     for axis_name, axis_dir in diag["current_axes_world"].items():
         end_p = panel_point(np.array(diag["current_gc_world"]) + axis_len * np.array(axis_dir))
-        draw_arrow(draw, gc_p, end_p, current_colors[axis_name], width=3)
+        draw_arrow(draw, gc_p, end_p, current_colors[axis_name], width=3, dashed=False)
     for axis_name, axis_dir in diag["rebuilt_axes_world"].items():
         end_p = panel_point(np.array(diag["jaw_midpoint_world"]) + axis_len * np.array(axis_dir))
-        draw_arrow(draw, jaw_mid_p, end_p, rebuilt_colors[axis_name], width=2)
+        draw_arrow(draw, jaw_mid_p, end_p, rebuilt_colors[axis_name], width=2, dashed=True)
 
     label_y = oy + height - 38
-    draw.text((ox + 10, label_y), "red/green/blue=current x/y/z", fill=(20, 20, 20))
-    draw.text((ox + 10, label_y + 16), "orange/purple/cyan=rebuild x/y/z", fill=(20, 20, 20))
+    draw.text((ox + 10, label_y), "solid = current frame (at grasp_center)", fill=(20, 20, 20))
+    draw.text((ox + 10, label_y + 16), "dashed = rebuilt frame (at jaw midpoint)", fill=(20, 20, 20))
 
 
 def build_composite_figure(render_img, diag, out_path):
@@ -360,6 +374,9 @@ def build_composite_figure(render_img, diag, out_path):
         "  magenta = jaw midpoint",
         "  red square = cube center",
         "  blue point = current grasp_center",
+        "  solid arrows = current frame axes",
+        "  dashed arrows = rebuilt frame axes",
+        "  red=x  green=y  blue=z",
     ]
     y = 610
     for line in summary_lines:
