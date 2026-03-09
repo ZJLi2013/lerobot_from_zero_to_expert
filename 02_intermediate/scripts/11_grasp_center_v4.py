@@ -369,6 +369,10 @@ def build_composite_figure(render_img, diag, out_path):
     canvas.save(out_path)
 
 
+def parse_csv_floats(text):
+    return [float(x.strip()) for x in text.split(",") if x.strip()]
+
+
 def main():
     ensure_display()
 
@@ -391,6 +395,15 @@ def main():
     parser.add_argument("--grasp-offset-y", type=float, default=0.0)
     parser.add_argument("--grasp-offset-z", type=float, default=-0.010)
     parser.add_argument("--gripper-open", type=float, default=20.0)
+    parser.add_argument("--gripper-close", type=float, default=-10.0)
+    parser.add_argument("--close-hold-steps", type=int, default=50)
+    parser.add_argument("--cube-friction", type=float, default=None)
+    parser.add_argument("--warmup-auto-tune", action="store_true")
+    parser.add_argument("--force-offset", action="store_true")
+    parser.add_argument("--offset-x-candidates", default="-0.008,-0.004,0.0,0.004,0.008")
+    parser.add_argument("--offset-y-candidates", default="-0.008,-0.004,0.0,0.004,0.008")
+    parser.add_argument("--offset-z-candidates", default="-0.010")
+    parser.add_argument("--trial-steps", type=int, default=90)
     parser.add_argument("--cpu", action="store_true")
     args = parser.parse_args()
 
@@ -425,10 +438,13 @@ def main():
         show_viewer=False,
     )
     scene.add_entity(gs.morphs.Plane())
-    cube = scene.add_entity(
-        gs.morphs.Box(size=(0.03, 0.03, 0.03), pos=(args.cube_x, args.cube_y, args.cube_z)),
+    cube_kw = dict(
+        morph=gs.morphs.Box(size=(0.03, 0.03, 0.03), pos=(args.cube_x, args.cube_y, args.cube_z)),
         surface=gs.surfaces.Default(color=(1.0, 0.3, 0.3, 1.0)),
     )
+    if args.cube_friction is not None:
+        cube_kw["material"] = gs.materials.Rigid(friction=args.cube_friction)
+    cube = scene.add_entity(**cube_kw)
     so101 = scene.add_entity(gs.morphs.MJCF(file=str(xml_path), pos=(0.0, 0.0, 0.0)))
 
     cam_up = scene.add_camera(
@@ -461,7 +477,7 @@ def main():
     fixed_jaw_link = so101.get_link(xml_cfg["fixed_jaw_box"]["body_name"])
     moving_jaw_link = so101.get_link(xml_cfg["moving_jaw_box"]["body_name"])
 
-    def reset_scene():
+    def reset_scene(settle_steps=30):
         so101.set_qpos(home_rad)
         so101.control_dofs_position(home_rad, dof_idx)
         so101.zero_all_dofs_velocity()
@@ -471,7 +487,7 @@ def main():
         cube.set_pos(cube_pos)
         cube.set_quat(torch.tensor([1, 0, 0, 0], dtype=torch.float32, device=gs.device).unsqueeze(0))
         cube.zero_all_dofs_velocity()
-        for _ in range(30):
+        for _ in range(settle_steps):
             scene.step()
 
     def solve_ik_seeded(pos, grip_deg, seed_rad=None):
@@ -489,6 +505,96 @@ def main():
         q_deg[5] = grip_deg
         return q_deg
 
+    def lerp(a, b, n):
+        a = np.array(a, dtype=np.float64)
+        b = np.array(b, dtype=np.float64)
+        return [a + (b - a) * (i + 1) / max(n, 1) for i in range(n)]
+
+    def build_trial_trajectory(cube_pos, offset_x, offset_y, offset_z, total_steps):
+        off = np.array([offset_x, offset_y, offset_z], dtype=np.float64)
+        q_pre = solve_ik_seeded(cube_pos + off + np.array([0.0, 0.0, 0.10]), args.gripper_open, home_rad)
+        q_pre_rad = np.deg2rad(np.array(q_pre, dtype=np.float32))
+
+        descent_wps = []
+        prev_rad = q_pre_rad
+        for i in range(6):
+            frac = (i + 1) / 6
+            z = 0.10 + (args.approach_z - 0.10) * frac
+            pos = cube_pos + off + np.array([0.0, 0.0, z], dtype=np.float64)
+            wp = solve_ik_seeded(pos, args.gripper_open, prev_rad)
+            descent_wps.append(wp)
+            prev_rad = np.deg2rad(np.array(wp, dtype=np.float32))
+
+        q_approach = descent_wps[-1]
+        q_close = q_approach.copy()
+        q_close[5] = args.gripper_close
+
+        q_close_rad = np.deg2rad(np.array(q_close, dtype=np.float32))
+        lift_wps = []
+        prev_rad = q_close_rad
+        for i in range(4):
+            frac = (i + 1) / 4
+            z = args.approach_z + (0.15 - args.approach_z) * frac
+            pos = cube_pos + off + np.array([0.0, 0.0, z], dtype=np.float64)
+            wp = solve_ik_seeded(pos, args.gripper_close, prev_rad)
+            lift_wps.append(wp)
+            prev_rad = np.deg2rad(np.array(wp, dtype=np.float32))
+
+        q_lift = lift_wps[-1]
+        traj = []
+        phases = []
+        n_move = max(15, total_steps // 8)
+        traj += lerp(HOME_DEG.copy(), q_pre, n_move)
+        phases += ["move_pre"] * n_move
+
+        steps_per_wp = max(3, total_steps // (8 * 6))
+        prev = q_pre
+        for wp in descent_wps:
+            traj += lerp(prev, wp, steps_per_wp)
+            phases += ["approach"] * steps_per_wp
+            prev = wp
+
+        n_close = max(8, total_steps // 12)
+        traj += lerp(q_approach, q_close, n_close)
+        phases += ["close"] * n_close
+
+        traj += [q_close.copy() for _ in range(args.close_hold_steps)]
+        phases += ["close_hold"] * args.close_hold_steps
+
+        steps_per_lift = max(5, total_steps // (8 * 4))
+        prev = q_close
+        for wp in lift_wps:
+            traj += lerp(prev, wp, steps_per_lift)
+            phases += ["lift"] * steps_per_lift
+            prev = wp
+
+        consumed = len(traj)
+        n_return = max(0, total_steps - consumed)
+        if n_return > 0:
+            traj += lerp(q_lift, HOME_DEG.copy(), n_return)
+            phases += ["return"] * n_return
+        return traj, phases
+
+    def run_warmup_trial(cube_pos, offset_x, offset_y, offset_z):
+        reset_scene(settle_steps=20)
+        traj, phases = build_trial_trajectory(cube_pos, offset_x, offset_y, offset_z, args.trial_steps)
+        z_before = None
+        z_after = None
+        for target_deg, phase in zip(traj, phases):
+            target_rad = np.deg2rad(np.array(target_deg, dtype=np.float32))
+            so101.control_dofs_position(target_rad, dof_idx)
+            scene.step()
+            z_now = float(to_numpy(cube.get_pos())[2])
+            if phase == "close" and z_before is None:
+                z_before = z_now
+            if phase == "lift":
+                z_after = z_now
+        if z_before is None:
+            z_before = float(to_numpy(cube.get_pos())[2])
+        if z_after is None:
+            z_after = float(to_numpy(cube.get_pos())[2])
+        return float(z_after - z_before)
+
     def get_jaw_box_world(link, cfg):
         link_pos = to_numpy(link.get_pos())
         link_quat = to_numpy(link.get_quat())
@@ -505,10 +611,32 @@ def main():
             "size": np.array(cfg["size"], dtype=np.float64),
         }
 
-    reset_scene()
     cube_pos = np.array([args.cube_x, args.cube_y, args.cube_z], dtype=np.float64)
+    warmup_results = []
+    selected_offset = np.array(
+        [args.grasp_offset_x, args.grasp_offset_y, args.grasp_offset_z], dtype=np.float64
+    )
+    if args.warmup_auto_tune:
+        x_candidates = parse_csv_floats(args.offset_x_candidates)
+        y_candidates = parse_csv_floats(args.offset_y_candidates)
+        z_candidates = parse_csv_floats(args.offset_z_candidates)
+        for ox in x_candidates:
+            for oy in y_candidates:
+                for oz in z_candidates:
+                    lift_delta = run_warmup_trial(cube_pos, ox, oy, oz)
+                    warmup_results.append(
+                        {
+                            "offset_world": [float(ox), float(oy), float(oz)],
+                            "lift_delta": float(lift_delta),
+                        }
+                    )
+        warmup_results.sort(key=lambda item: item["lift_delta"], reverse=True)
+        if warmup_results and not args.force_offset:
+            selected_offset = np.array(warmup_results[0]["offset_world"], dtype=np.float64)
+
+    reset_scene()
     approach_target = cube_pos + np.array(
-        [args.grasp_offset_x, args.grasp_offset_y, args.grasp_offset_z + args.approach_z],
+        [selected_offset[0], selected_offset[1], selected_offset[2] + args.approach_z],
         dtype=np.float64,
     )
     q_approach_deg = solve_ik_seeded(approach_target, args.gripper_open, seed_rad=home_rad)
@@ -587,7 +715,15 @@ def main():
         "exp_id": args.exp_id,
         "xml_path": str(xml_path),
         "cube_center_world": cube_pos.tolist(),
+        "cube_friction": args.cube_friction,
+        "warmup_auto_tune": args.warmup_auto_tune,
+        "force_offset": args.force_offset,
+        "gripper_open_deg": args.gripper_open,
+        "gripper_close_deg": args.gripper_close,
+        "close_hold_steps": args.close_hold_steps,
         "approach_target_world": approach_target.tolist(),
+        "selected_offset_world": selected_offset.tolist(),
+        "warmup_results": warmup_results,
         "current_gc_local_pos": xml_cfg["grasp_center"]["pos"].tolist(),
         "current_gc_local_quat": xml_cfg["grasp_center"]["quat"].tolist(),
         "current_gc_world": gc_world.tolist(),
@@ -629,6 +765,10 @@ def main():
     print("V4 FRAME DIAGNOSTIC")
     print("=" * 70)
     print(f"XML:                       {xml_path}")
+    print(f"cube_friction:             {args.cube_friction}")
+    print(f"warmup_auto_tune:          {args.warmup_auto_tune}")
+    print(f"force_offset:              {args.force_offset}")
+    print(f"Selected offset world:     {np.round(selected_offset, 6).tolist()}")
     print(f"Approach target world:     {np.round(approach_target, 6).tolist()}")
     print(f"Current local pos:         {np.round(xml_cfg['grasp_center']['pos'], 6).tolist()}")
     print(f"Current local quat:        {np.round(xml_cfg['grasp_center']['quat'], 6).tolist()}")
