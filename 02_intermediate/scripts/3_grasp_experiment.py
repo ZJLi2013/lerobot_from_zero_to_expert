@@ -476,7 +476,7 @@ def main():
             q_test = so101.inverse_kinematics(
                 link=ee_link,
                 pos=ik_target,
-                quat=IK_QUAT_DOWN,
+                quat=None,
                 local_point=tcp_local_point,
                 init_qpos=home_rad,
                 max_solver_iters=50,
@@ -486,7 +486,7 @@ def main():
             q_test = so101.inverse_kinematics_multilink(
                 links=[ee_link, gripper_ref],
                 poss=[ik_target - tcp_half_span_world, ik_target + tcp_half_span_world],
-                quats=[IK_QUAT_DOWN, IK_QUAT_DOWN],
+                quats=None,
                 init_qpos=home_rad,
                 max_solver_iters=50,
                 damping=0.02,
@@ -495,7 +495,7 @@ def main():
             q_test = so101.inverse_kinematics(
                 link=ee_link,
                 pos=ik_target,
-                quat=IK_QUAT_DOWN,
+                quat=None,
                 init_qpos=home_rad,
                 max_solver_iters=50,
                 damping=0.02,
@@ -581,7 +581,7 @@ def main():
                 so101.inverse_kinematics(
                     link=ee_link,
                     pos=pos,
-                    quat=IK_QUAT_DOWN,
+                    quat=None,
                     local_point=tcp_local_point,
                     init_qpos=seed_rad,
                     max_solver_iters=50,
@@ -593,7 +593,7 @@ def main():
                 so101.inverse_kinematics_multilink(
                     links=[ee_link, gripper_ref],
                     poss=[pos - tcp_half_span_world, pos + tcp_half_span_world],
-                    quats=[IK_QUAT_DOWN, IK_QUAT_DOWN],
+                    quats=None,
                     init_qpos=seed_rad,
                     max_solver_iters=50,
                     damping=0.02,
@@ -604,7 +604,7 @@ def main():
                 so101.inverse_kinematics(
                     link=ee_link,
                     pos=pos,
-                    quat=IK_QUAT_DOWN,
+                    quat=None,
                     init_qpos=seed_rad,
                     max_solver_iters=50,
                     damping=0.02,
