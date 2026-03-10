@@ -138,6 +138,7 @@ HOME_DEG = np.array([0.0, -30.0, 90.0, -60.0, 0.0, 0.0], dtype=np.float32)
 IK_QUAT_DOWN = np.array([0.0, 1.0, 0.0, 0.0])
 KP = np.array([500.0, 500.0, 400.0, 400.0, 300.0, 200.0])
 KV = np.array([50.0, 50.0, 40.0, 40.0, 30.0, 20.0])
+CUBE_SIZE = np.array([0.03, 0.03, 0.03], dtype=np.float32)
 
 
 def stage(name):
@@ -337,7 +338,7 @@ def main():
     scene.add_entity(gs.morphs.Plane())
 
     cube_entity_kw = dict(
-        morph=gs.morphs.Box(size=(0.03, 0.03, 0.03), pos=(0.15, 0.0, 0.015)),
+        morph=gs.morphs.Box(size=tuple(CUBE_SIZE.tolist()), pos=(0.15, 0.0, 0.015)),
         surface=gs.surfaces.Default(color=(1.0, 0.3, 0.3, 1.0)),
     )
     if args.cube_friction is not None:
@@ -678,6 +679,7 @@ def main():
 
         q_lift = lift_wps[-1]
 
+        validation_diag = None
         if verbose:
             q_approach_rad = np.deg2rad(np.array(q_approach, dtype=np.float32))
             so101.set_qpos(q_approach_rad)
@@ -706,6 +708,30 @@ def main():
             )
             print(
                 f"    [diag] TCP offset from target: [{tcp_pos[0]-pos_approach[0]:.4f}, {tcp_pos[1]-pos_approach[1]:.4f}, {tcp_pos[2]-pos_approach[2]:.4f}]"
+            )
+
+            jaw_link_for_z = ee_link
+            if ee_name == "grasp_center":
+                try:
+                    jaw_link_for_z = so101.get_link("moving_jaw_so101_v1")
+                except Exception:
+                    jaw_link_for_z = ee_link
+            jaw_pos = to_numpy(jaw_link_for_z.get_pos())
+            cube_center_now = to_numpy(cube.get_pos())
+            cube_top_z = float(cube_center_now[2] + CUBE_SIZE[2] * 0.5)
+            validation_diag = {
+                "ik_target": [float(v) for v in pos_approach.tolist()],
+                "tcp_actual": [float(v) for v in tcp_pos.tolist()],
+                "tcp_offset": [float(v) for v in (tcp_pos - pos_approach).tolist()],
+                "gripper_jaw_z": float(jaw_pos[2]),
+                "cube_top_z": cube_top_z,
+                "jaw_below_cube_top": bool(float(jaw_pos[2]) < cube_top_z),
+            }
+            print(
+                "    [diag] quick-check: "
+                f"gripper_jaw_z={validation_diag['gripper_jaw_z']:.4f}, "
+                f"cube_top_z={validation_diag['cube_top_z']:.4f}, "
+                f"jaw_below_top={validation_diag['jaw_below_cube_top']}"
             )
             for other_link in so101.links:
                 other_pos = to_numpy(so101.get_link(other_link.name).get_pos())
@@ -751,13 +777,13 @@ def main():
             traj += lerp(q_lift, home_deg.copy(), n_return)
             phases += ["return"] * n_return
 
-        return traj, phases
+        return traj, phases, validation_diag
 
     def run_trial(cube_pos, offset_x, offset_y, offset_z):
         """Quick trial: reset → chained-IK descent → close → lift → measure delta_z."""
         reset_scene(cube_pos, settle_steps=20)
 
-        traj, phases = build_trajectory_chained_ik(
+        traj, phases, _ = build_trajectory_chained_ik(
             cube_pos, offset_x, offset_y, offset_z, total_steps=90
         )
 
@@ -932,7 +958,7 @@ def main():
 
         reset_scene(cube_pos, settle_steps=args.settle_steps)
 
-        trajectory, labels = build_trajectory_chained_ik(
+        trajectory, labels, validation_diag = build_trajectory_chained_ik(
             cube_pos,
             chosen_offset[0],
             chosen_offset[1],
@@ -999,6 +1025,8 @@ def main():
                 "grasp_success": grasp_success,
             }
         )
+        if validation_diag is not None:
+            metrics["episodes"][-1]["quick_validation"] = validation_diag
         print(
             f"  [ep {ep}] grasp={'✓' if grasp_success else '✗'} "
             f"delta_z={lift_delta:.4f}m "
@@ -1080,6 +1108,17 @@ def main():
     with open(out_dir / "metrics.json", "w", encoding="utf-8") as f:
         json.dump(metrics, f, ensure_ascii=False, indent=2)
     print(f"  ✓ metrics.json")
+
+    latest_ep = metrics["episodes"][-1] if metrics["episodes"] else {}
+    summary = {
+        "exp_id": args.exp_id,
+        "xml_path": str(xml_path),
+        "offset_xyz": [float(v) for v in metrics.get("selected_grasp_offset", [0.0, 0.0, 0.0])],
+        "quick_validation": latest_ep.get("quick_validation", {}),
+    }
+    with open(out_dir / "summary.json", "w", encoding="utf-8") as f:
+        json.dump(summary, f, ensure_ascii=False, indent=2)
+    print(f"  ✓ summary.json")
 
     # Summary
     total_success = sum(1 for e in metrics["episodes"] if e["grasp_success"])
