@@ -147,8 +147,18 @@ def main():
 
     ik_supports_local_point = "local_point" in inspect.signature(so101.inverse_kinematics).parameters
     gripper_ref = None
+    fixed_jaw_link = None
+    moving_jaw_link = None
     tcp_local_point = None
     tcp_half_span_world = None
+    try:
+        fixed_jaw_link = so101.get_link("gripper")
+    except Exception:
+        fixed_jaw_link = None
+    try:
+        moving_jaw_link = so101.get_link("moving_jaw_so101_v1")
+    except Exception:
+        moving_jaw_link = None
     if ee_name == "moving_jaw_so101_v1":
         try:
             gripper_ref = so101.get_link("gripper")
@@ -216,7 +226,12 @@ def main():
         else:
             tcp_pos = ee_pos
         delta = tcp_pos - target_xyz
-        return tcp_pos, delta
+        delta_jaw = None
+        if fixed_jaw_link is not None and moving_jaw_link is not None:
+            z_fixed = float(to_numpy(fixed_jaw_link.get_pos())[2])
+            z_moving = float(to_numpy(moving_jaw_link.get_pos())[2])
+            delta_jaw = float(z_moving - z_fixed)
+        return tcp_pos, delta, delta_jaw
 
     stage("2/4 Run no-contact grid")
     print(f"points={len(points)} repeats={args.repeats} target_z={args.target_z:.4f}")
@@ -226,17 +241,21 @@ def main():
         samples = []
         for _ in range(args.repeats):
             reset_home()
-            tcp_pos, delta = solve_and_measure(target)
+            tcp_pos, delta, delta_jaw = solve_and_measure(target)
             samples.append(
                 {
                     "ik_target": [float(v) for v in target.tolist()],
                     "tcp_actual": [float(v) for v in tcp_pos.tolist()],
                     "tcp_offset": [float(v) for v in delta.tolist()],
+                    "delta_jaw": delta_jaw,
                 }
             )
         deltas = np.array([s["tcp_offset"] for s in samples], dtype=np.float64)
         mean_delta = deltas.mean(axis=0)
         std_delta = deltas.std(axis=0)
+        jaw_vals = np.array(
+            [s["delta_jaw"] for s in samples if s["delta_jaw"] is not None], dtype=np.float64
+        )
         row = {
             "target_x": float(x),
             "target_y": float(y),
@@ -244,6 +263,8 @@ def main():
             "repeats": args.repeats,
             "tcp_offset_mean": [float(v) for v in mean_delta.tolist()],
             "tcp_offset_std": [float(v) for v in std_delta.tolist()],
+            "delta_jaw_mean": float(jaw_vals.mean()) if jaw_vals.size > 0 else None,
+            "delta_jaw_std": float(jaw_vals.std()) if jaw_vals.size > 0 else None,
             "samples": samples,
         }
         rows.append(row)
@@ -258,10 +279,18 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
 
     mean_all = np.array([r["tcp_offset_mean"] for r in rows], dtype=np.float64)
+    jaw_all = np.array(
+        [r["delta_jaw_mean"] for r in rows if r.get("delta_jaw_mean") is not None],
+        dtype=np.float64,
+    )
     summary = {
         "exp_id": args.exp_id,
         "xml_path": str(xml_path),
         "ee_link": ee_name,
+        "jaw_links": {
+            "fixed": "gripper" if fixed_jaw_link is not None else None,
+            "moving": "moving_jaw_so101_v1" if moving_jaw_link is not None else None,
+        },
         "ik_supports_local_point": bool(ik_supports_local_point),
         "target_z": float(args.target_z),
         "grid_x": xs,
@@ -270,6 +299,8 @@ def main():
         "repeats": int(args.repeats),
         "tcp_offset_global_mean": [float(v) for v in mean_all.mean(axis=0).tolist()],
         "tcp_offset_global_std_over_points": [float(v) for v in mean_all.std(axis=0).tolist()],
+        "delta_jaw_global_mean": float(jaw_all.mean()) if jaw_all.size > 0 else None,
+        "delta_jaw_global_std_over_points": float(jaw_all.std()) if jaw_all.size > 0 else None,
         "point_results": rows,
     }
     with open(out_dir / "summary.json", "w", encoding="utf-8") as f:
