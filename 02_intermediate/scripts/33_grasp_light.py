@@ -208,6 +208,11 @@ LEVEL_RECOVERY_ROLL_STEP_RAD = np.deg2rad(2.0)
 LEVEL_RECOVERY_MAX_ROLL_STEPS = 8
 LEVEL_RECOVERY_FINE_ROLL_STEP_RAD = np.deg2rad(1.0)
 LEVEL_RECOVERY_FINE_ROLL_STEPS = 2
+REANCHOR_XY_TOL = 0.012
+DESCENT_MAX_RISE = 0.0015
+PRE_CLOSE_POS_TOL = 0.012
+PRE_CLOSE_MID_XY_TOL = 0.018
+PRE_CLOSE_MAX_ABOVE_TOP = 0.012
 
 
 def phase_stats(rows):
@@ -380,6 +385,7 @@ def main() -> None:
         )
         z_fixed_surface = float(fixed_inner_surface[2])
         z_moving_surface = float(moving_inner_surface[2])
+        mid_inner_surface = 0.5 * (fixed_inner_surface + moving_inner_surface)
         return {
             "dz_link_origin": float(z_moving_link - z_fixed_link),
             "dz_inner_surface": float(z_moving_surface - z_fixed_surface),
@@ -387,6 +393,7 @@ def main() -> None:
             "z_moving_link_origin": z_moving_link,
             "z_fixed_inner_surface": z_fixed_surface,
             "z_moving_inner_surface": z_moving_surface,
+            "mid_inner_surface": np.array(mid_inner_surface, dtype=np.float64),
         }
 
     def measure_dz_for_qdeg(q_deg, settle_steps=3):
@@ -397,6 +404,33 @@ def main() -> None:
             scene.step()
         # Primary gating metric: inner-surface delta-z.
         return float(measure_jaw_dz()["dz_inner_surface"])
+
+    cube_top_z = float(cube_init[2] + CUBE_SIZE[2] * 0.5)
+
+    def evaluate_qdeg_against_target(q_deg, target_pos, settle_steps=3):
+        q_rad = np.deg2rad(np.array(q_deg, dtype=np.float32))
+        so101.set_qpos(q_rad)
+        so101.control_dofs_position(q_rad, dof_idx)
+        for _ in range(settle_steps):
+            scene.step()
+        jaw = measure_jaw_dz()
+        gc = np.array(to_numpy(ee.get_pos()), dtype=np.float64)
+        target = np.array(target_pos, dtype=np.float64)
+        mid = np.array(jaw["mid_inner_surface"], dtype=np.float64)
+        gc_pos_error = float(np.linalg.norm(gc - target))
+        gc_xy_drift = float(np.linalg.norm(gc[:2] - target[:2]))
+        mid_pos_error = float(np.linalg.norm(mid - target))
+        mid_xy_drift = float(np.linalg.norm(mid[:2] - target[:2]))
+        return {
+            "dz_inner_surface": float(jaw["dz_inner_surface"]),
+            "dz_link_origin": float(jaw["dz_link_origin"]),
+            "mid_surface_z": float(jaw["mid_inner_surface"][2]),
+            "mid_surface_pos_error": mid_pos_error,
+            "mid_surface_xy_drift": mid_xy_drift,
+            "gc_pos_error": gc_pos_error,
+            "gc_xy_drift": gc_xy_drift,
+            "mid_surface_to_cube_top": float(jaw["mid_inner_surface"][2] - cube_top_z),
+        }
 
     # trajectory (same skeleton as 03/12)
     pos_pre = cube_init + off + np.array([0.0, 0.0, 0.10], dtype=np.float64)
@@ -432,6 +466,11 @@ def main() -> None:
     recovery_success_count = 0
     recovery_fail_count = 0
     recovery_events = []
+    reanchor_reject_count = 0
+    reanchor_reject_events = []
+    q_pre_eval = evaluate_qdeg_against_target(q_pre, pos_pre, settle_steps=3)
+    prev_mid_surface_z = float(q_pre_eval["mid_surface_z"])
+    prev_wp_deg = np.array(q_pre, dtype=np.float64)
     for i in range(n_descent_wps):
         frac = (i + 1) / n_descent_wps
         z = 0.10 + (args.approach_z - 0.10) * frac
@@ -547,15 +586,90 @@ def main() -> None:
                     gate_blocked = True
                     gate_block_wp = int(i)
                     gate_block_dz = float(best["dz"])
+            # Re-anchor to current waypoint target with the recovered quat branch.
+            anchor_quat = quat_ref if use_ref_quat else None
+            wp_anchor = solve_ik_seeded(
+                pos,
+                args.gripper_open,
+                prev_rad,
+                quat_target=anchor_quat,
+            )
+            anchor_eval = evaluate_qdeg_against_target(wp_anchor, pos, settle_steps=3)
+            rise_reject = anchor_eval["mid_surface_z"] > (prev_mid_surface_z + DESCENT_MAX_RISE)
+            xy_reject = anchor_eval["mid_surface_xy_drift"] > REANCHOR_XY_TOL
+            if rise_reject or xy_reject:
+                reanchor_reject_count += 1
+                reanchor_reject_events.append(
+                    {
+                        "wp_idx": int(i),
+                        "rise_reject": bool(rise_reject),
+                        "xy_reject": bool(xy_reject),
+                        "mid_surface_z": float(anchor_eval["mid_surface_z"]),
+                        "prev_mid_surface_z": float(prev_mid_surface_z),
+                        "mid_surface_xy_drift": float(anchor_eval["mid_surface_xy_drift"]),
+                    }
+                )
+                # Hard reject: keep previous accepted waypoint instead of drifting branch.
+                wp = prev_wp_deg.copy()
+            else:
+                wp = wp_anchor
+                prev_mid_surface_z = float(anchor_eval["mid_surface_z"])
+                prev_wp_deg = np.array(wp, dtype=np.float64)
         descent_wps.append(wp)
         prev_rad = np.deg2rad(np.array(wp, dtype=np.float32))
     if not descent_wps:
         raise RuntimeError("No descent waypoint generated; check IK/gate settings")
     descent_wps_generated = int(len(descent_wps))
     q_approach = descent_wps[-1]
+    pre_close_target = cube_init + off + np.array([0.0, 0.0, args.approach_z], dtype=np.float64)
+    pre_close_replan = {
+        "enabled": bool(args.quat_mode == "pregrasp_flatten_yaw"),
+        "jaw_parallel_ok": None,
+        "mid_surface_xy_ok": None,
+        "mid_surface_height_ok": None,
+        "grasp_center_error_ok": None,
+        "pre_close_gate_pass": None,
+        "gc_pos_error": None,
+        "mid_surface_pos_error": None,
+        "mid_surface_xy_drift": None,
+        "dz_inner_surface": None,
+        "mid_surface_to_cube_top": None,
+    }
+    if args.quat_mode == "pregrasp_flatten_yaw" and quat_ref is not None:
+        q_approach = solve_ik_seeded(
+            pre_close_target,
+            args.gripper_open,
+            prev_rad,
+            quat_target=quat_ref,
+        )
+        pre_close_eval = evaluate_qdeg_against_target(q_approach, pre_close_target, settle_steps=5)
+        pre_close_replan.update(
+            {
+                "gc_pos_error": float(pre_close_eval["gc_pos_error"]),
+                "mid_surface_pos_error": float(pre_close_eval["mid_surface_pos_error"]),
+                "mid_surface_xy_drift": float(pre_close_eval["mid_surface_xy_drift"]),
+                "dz_inner_surface": float(pre_close_eval["dz_inner_surface"]),
+                "mid_surface_to_cube_top": float(pre_close_eval["mid_surface_to_cube_top"]),
+                "jaw_parallel_ok": bool(abs(pre_close_eval["dz_inner_surface"]) <= LEVEL_TOLERANCE),
+                "grasp_center_error_ok": bool(pre_close_eval["gc_pos_error"] <= PRE_CLOSE_POS_TOL),
+                "mid_surface_xy_ok": bool(pre_close_eval["mid_surface_xy_drift"] <= PRE_CLOSE_MID_XY_TOL),
+                "mid_surface_height_ok": bool(pre_close_eval["mid_surface_to_cube_top"] <= PRE_CLOSE_MAX_ABOVE_TOP),
+            }
+        )
+        pre_close_replan["pre_close_gate_pass"] = bool(
+            pre_close_replan["jaw_parallel_ok"]
+            and pre_close_replan["mid_surface_xy_ok"]
+            and pre_close_replan["mid_surface_height_ok"]
+        )
+        prev_rad = np.deg2rad(np.array(q_approach, dtype=np.float32))
 
     q_close = q_approach.copy()
-    if so101.n_dofs >= 6:
+    close_skipped = bool(
+        args.quat_mode == "pregrasp_flatten_yaw"
+        and pre_close_replan["enabled"]
+        and not pre_close_replan["pre_close_gate_pass"]
+    )
+    if so101.n_dofs >= 6 and not close_skipped:
         q_close[5] = args.gripper_close
 
     n_lift_wps = 4
@@ -625,10 +739,15 @@ def main() -> None:
     keep_approach = [i for i, p in enumerate(phases) if p == "approach"]
     keep_approach_tail = set(keep_approach[-EXPORT_APPROACH_TAIL :])
     if args.quat_mode == "pregrasp_flatten_yaw":
-        # For gate-leveling runs, keep full pre_grasp_level + full approach.
+        # For gate-leveling runs, keep full pre_grasp_level + approach + close/hold/lift.
         keep_level = {i for i, p in enumerate(phases) if p == "pre_grasp_level"}
         keep_approach_full = set(keep_approach)
-        keep = keep_level | keep_approach_full
+        keep_close_and_lift = {
+            i
+            for i, p in enumerate(phases)
+            if p in {"approach_hold", "close", "close_hold", "lift"}
+        }
+        keep = keep_level | keep_approach_full | keep_close_and_lift
     else:
         # Baseline run: only keep the final approach tail.
         keep = keep_approach_tail
@@ -713,6 +832,14 @@ def main() -> None:
             "fail_count": int(recovery_fail_count),
             "events": recovery_events,
         },
+        "reanchor_checks": {
+            "xy_tol": float(REANCHOR_XY_TOL),
+            "descent_max_rise": float(DESCENT_MAX_RISE),
+            "reject_count": int(reanchor_reject_count),
+            "events": reanchor_reject_events,
+        },
+        "pre_close_replan": pre_close_replan,
+        "close_skipped_by_pre_close_gate": bool(close_skipped),
         "descent_wps_planned": int(n_descent_wps),
         "descent_wps_used": int(descent_wps_generated),
         "descent_wps_executed": int(len(descent_wps)),
@@ -729,6 +856,9 @@ def main() -> None:
                 args.quat_mode == "pregrasp_flatten_yaw"
             ),
             "approach_all_when_flatten_yaw": bool(
+                args.quat_mode == "pregrasp_flatten_yaw"
+            ),
+            "close_close_hold_lift_all_when_flatten_yaw": bool(
                 args.quat_mode == "pregrasp_flatten_yaw"
             ),
         },
