@@ -208,8 +208,10 @@ LEVEL_RECOVERY_ROLL_STEP_RAD = np.deg2rad(2.0)
 LEVEL_RECOVERY_MAX_ROLL_STEPS = 8
 LEVEL_RECOVERY_FINE_ROLL_STEP_RAD = np.deg2rad(1.0)
 LEVEL_RECOVERY_FINE_ROLL_STEPS = 2
-REANCHOR_XY_TOL = 0.012
+LOCAL_REPLAN_XY_TOL = 0.012
 DESCENT_MAX_RISE = 0.0015
+LOCAL_REPLAN_DZ_REGRESS_TOL = 0.001
+LOCAL_REPLAN_HORIZON_CANDIDATES = (4, 3, 2)
 PRE_CLOSE_POS_TOL = 0.012
 PRE_CLOSE_MID_XY_TOL = 0.018
 PRE_CLOSE_MAX_ABOVE_TOP = 0.012
@@ -262,6 +264,16 @@ def main() -> None:
         choices=["none", "pregrasp_flatten_yaw"],
         default="none",
         help="none: default IK; pregrasp_flatten_yaw: enforce flattened-yaw quat on late descent/approach",
+    )
+    ap.add_argument(
+        "--summary-verbose-events",
+        action="store_true",
+        help="Include full recovery/replan event arrays in summary (default: compact).",
+    )
+    ap.add_argument(
+        "--summary-full-trace",
+        action="store_true",
+        help="Include full dz_jaw_trace in summary (default: only tail).",
     )
     args = ap.parse_args()
 
@@ -432,6 +444,14 @@ def main() -> None:
             "mid_surface_to_cube_top": float(jaw["mid_inner_surface"][2] - cube_top_z),
         }
 
+    def get_gc_pos_for_qdeg(q_deg, settle_steps=2):
+        q_rad = np.deg2rad(np.array(q_deg, dtype=np.float32))
+        so101.set_qpos(q_rad)
+        so101.control_dofs_position(q_rad, dof_idx)
+        for _ in range(settle_steps):
+            scene.step()
+        return np.array(to_numpy(ee.get_pos()), dtype=np.float64)
+
     # trajectory (same skeleton as 03/12)
     pos_pre = cube_init + off + np.array([0.0, 0.0, 0.10], dtype=np.float64)
     q_pre = solve_ik_seeded(pos_pre, args.gripper_open, home_rad, quat_target=None)
@@ -460,17 +480,17 @@ def main() -> None:
             scene.step()
     n_descent_wps = 6
     descent_wps = []
-    gate_blocked = False
-    gate_block_wp = None
-    gate_block_dz = None
     recovery_success_count = 0
     recovery_fail_count = 0
     recovery_events = []
-    reanchor_reject_count = 0
-    reanchor_reject_events = []
+    local_replan_accept_count = 0
+    local_replan_fallback_count = 0
+    local_replan_events = []
     q_pre_eval = evaluate_qdeg_against_target(q_pre, pos_pre, settle_steps=3)
     prev_mid_surface_z = float(q_pre_eval["mid_surface_z"])
+    prev_dz_abs = float(abs(q_pre_eval["dz_inner_surface"]))
     prev_wp_deg = np.array(q_pre, dtype=np.float64)
+    quat_prev = quat_ref
     for i in range(n_descent_wps):
         frac = (i + 1) / n_descent_wps
         z = 0.10 + (args.approach_z - 0.10) * frac
@@ -583,43 +603,101 @@ def main() -> None:
                     wp = best["wp"]
                     dz_wp = float(best["dz"])
                     quat_ref = best["quat"]
-                    gate_blocked = True
-                    gate_block_wp = int(i)
-                    gate_block_dz = float(best["dz"])
-            # Re-anchor to current waypoint target with the recovered quat branch.
-            anchor_quat = quat_ref if use_ref_quat else None
-            wp_anchor = solve_ik_seeded(
-                pos,
-                args.gripper_open,
-                prev_rad,
-                quat_target=anchor_quat,
-            )
-            anchor_eval = evaluate_qdeg_against_target(wp_anchor, pos, settle_steps=3)
-            rise_reject = anchor_eval["mid_surface_z"] > (prev_mid_surface_z + DESCENT_MAX_RISE)
-            xy_reject = anchor_eval["mid_surface_xy_drift"] > REANCHOR_XY_TOL
-            if rise_reject or xy_reject:
-                reanchor_reject_count += 1
-                reanchor_reject_events.append(
-                    {
-                        "wp_idx": int(i),
+            # Local short-horizon replanning from current pose; do not pull back to old path.
+            local_quat = quat_ref if use_ref_quat else None
+            local_accept = None
+            local_best = None
+            gc_prev = get_gc_pos_for_qdeg(prev_wp_deg, settle_steps=2)
+            for h in LOCAL_REPLAN_HORIZON_CANDIDATES:
+                alpha = min(1.0, 2.0 / float(h))
+                local_pos = gc_prev + alpha * (pos - gc_prev)
+                wp_local = solve_ik_seeded(
+                    local_pos,
+                    args.gripper_open,
+                    prev_rad,
+                    quat_target=local_quat,
+                )
+                local_eval = evaluate_qdeg_against_target(wp_local, local_pos, settle_steps=3)
+                dz_regress_reject = (
+                    abs(float(local_eval["dz_inner_surface"]))
+                    > (prev_dz_abs + LOCAL_REPLAN_DZ_REGRESS_TOL)
+                )
+                rise_reject = local_eval["mid_surface_z"] > (prev_mid_surface_z + DESCENT_MAX_RISE)
+                xy_reject = local_eval["gc_xy_drift"] > LOCAL_REPLAN_XY_TOL
+                score = (
+                    abs(float(local_eval["dz_inner_surface"]))
+                    + 0.5 * float(local_eval["gc_xy_drift"])
+                    + 0.5 * float(local_eval["mid_surface_xy_drift"])
+                )
+                if local_best is None or score < local_best["score"]:
+                    local_best = {
+                        "horizon": int(h),
+                        "wp": wp_local,
+                        "eval": local_eval,
+                        "score": float(score),
+                        "alpha": float(alpha),
+                        "dz_regress_reject": bool(dz_regress_reject),
                         "rise_reject": bool(rise_reject),
                         "xy_reject": bool(xy_reject),
-                        "mid_surface_z": float(anchor_eval["mid_surface_z"]),
-                        "prev_mid_surface_z": float(prev_mid_surface_z),
-                        "mid_surface_xy_drift": float(anchor_eval["mid_surface_xy_drift"]),
+                    }
+                if not (dz_regress_reject or rise_reject or xy_reject):
+                    local_accept = {
+                        "horizon": int(h),
+                        "wp": wp_local,
+                        "eval": local_eval,
+                        "alpha": float(alpha),
+                    }
+                    break
+
+            if local_accept is not None:
+                wp = local_accept["wp"]
+                local_eval = local_accept["eval"]
+                local_replan_accept_count += 1
+                local_replan_events.append(
+                    {
+                        "wp_idx": int(i),
+                        "accepted": True,
+                        "horizon": int(local_accept["horizon"]),
+                        "alpha": float(local_accept["alpha"]),
+                        "dz_abs": float(abs(local_eval["dz_inner_surface"])),
+                        "gc_xy_drift": float(local_eval["gc_xy_drift"]),
+                        "mid_surface_xy_drift": float(local_eval["mid_surface_xy_drift"]),
                     }
                 )
-                # Hard reject: keep previous accepted waypoint instead of drifting branch.
-                wp = prev_wp_deg.copy()
-            else:
-                wp = wp_anchor
-                prev_mid_surface_z = float(anchor_eval["mid_surface_z"])
+                prev_mid_surface_z = float(local_eval["mid_surface_z"])
+                prev_dz_abs = float(abs(local_eval["dz_inner_surface"]))
                 prev_wp_deg = np.array(wp, dtype=np.float64)
+                quat_prev = quat_ref
+            else:
+                # Fallback to best local candidate instead of old-path reanchor.
+                wp = local_best["wp"]
+                local_eval = local_best["eval"]
+                local_replan_fallback_count += 1
+                local_replan_events.append(
+                    {
+                        "wp_idx": int(i),
+                        "accepted": False,
+                        "horizon": int(local_best["horizon"]),
+                        "alpha": float(local_best["alpha"]),
+                        "dz_regress_reject": bool(local_best["dz_regress_reject"]),
+                        "rise_reject": bool(local_best["rise_reject"]),
+                        "xy_reject": bool(local_best["xy_reject"]),
+                        "dz_abs": float(abs(local_eval["dz_inner_surface"])),
+                        "gc_xy_drift": float(local_eval["gc_xy_drift"]),
+                        "mid_surface_xy_drift": float(local_eval["mid_surface_xy_drift"]),
+                    }
+                )
+                if local_eval["mid_surface_z"] > (prev_mid_surface_z + DESCENT_MAX_RISE):
+                    wp = prev_wp_deg.copy()
+                    quat_ref = quat_prev
+                else:
+                    prev_mid_surface_z = float(local_eval["mid_surface_z"])
+                    prev_dz_abs = float(abs(local_eval["dz_inner_surface"]))
+                    prev_wp_deg = np.array(wp, dtype=np.float64)
         descent_wps.append(wp)
         prev_rad = np.deg2rad(np.array(wp, dtype=np.float32))
     if not descent_wps:
         raise RuntimeError("No descent waypoint generated; check IK/gate settings")
-    descent_wps_generated = int(len(descent_wps))
     q_approach = descent_wps[-1]
     pre_close_target = cube_init + off + np.array([0.0, 0.0, args.approach_z], dtype=np.float64)
     pre_close_replan = {
@@ -806,6 +884,48 @@ def main() -> None:
             # simple heuristic: |delta_approach| > 1 mm and trend sign matches
             "approach_accumulates": bool(abs(app_end - app_start) > 1e-3 and np.sign(app_end - app_start) == np.sign(slope)),
         }
+    local_replan_reason_counts = {
+        "dz_regress_reject": 0,
+        "rise_reject": 0,
+        "xy_reject": 0,
+    }
+    for ev in local_replan_events:
+        if ev.get("accepted", True):
+            continue
+        if ev.get("dz_regress_reject", False):
+            local_replan_reason_counts["dz_regress_reject"] += 1
+        if ev.get("rise_reject", False):
+            local_replan_reason_counts["rise_reject"] += 1
+        if ev.get("xy_reject", False):
+            local_replan_reason_counts["xy_reject"] += 1
+
+    level_recovery_summary = {
+        "roll_step_deg": float(np.degrees(LEVEL_RECOVERY_ROLL_STEP_RAD)),
+        "max_roll_steps": int(LEVEL_RECOVERY_MAX_ROLL_STEPS),
+        "fine_roll_step_deg": float(np.degrees(LEVEL_RECOVERY_FINE_ROLL_STEP_RAD)),
+        "fine_roll_steps": int(LEVEL_RECOVERY_FINE_ROLL_STEPS),
+        "success_count": int(recovery_success_count),
+        "fail_count": int(recovery_fail_count),
+        "events_count": int(len(recovery_events)),
+        "events_head": recovery_events[:8],
+    }
+    if args.summary_verbose_events:
+        level_recovery_summary["events"] = recovery_events
+
+    local_replan_summary = {
+        "xy_tol": float(LOCAL_REPLAN_XY_TOL),
+        "descent_max_rise": float(DESCENT_MAX_RISE),
+        "dz_regress_tol": float(LOCAL_REPLAN_DZ_REGRESS_TOL),
+        "horizon_candidates": [int(v) for v in LOCAL_REPLAN_HORIZON_CANDIDATES],
+        "accept_count": int(local_replan_accept_count),
+        "fallback_count": int(local_replan_fallback_count),
+        "fallback_reason_counts": local_replan_reason_counts,
+        "events_count": int(len(local_replan_events)),
+        "events_head": local_replan_events[:12],
+    }
+    if args.summary_verbose_events:
+        local_replan_summary["events"] = local_replan_events
+
     summary = {
         "exp_id": args.exp_id,
         "xml_path": str(xml),
@@ -820,30 +940,13 @@ def main() -> None:
         "quat_start_wp": int(QUAT_START_WP),
         "level_tolerance": float(LEVEL_TOLERANCE),
         "level_hold_steps": int(LEVEL_HOLD_STEPS),
-        "gate_blocked": bool(gate_blocked),
-        "gate_block_wp": gate_block_wp,
-        "gate_block_dz": gate_block_dz,
-        "level_recovery": {
-            "roll_step_deg": float(np.degrees(LEVEL_RECOVERY_ROLL_STEP_RAD)),
-            "max_roll_steps": int(LEVEL_RECOVERY_MAX_ROLL_STEPS),
-            "fine_roll_step_deg": float(np.degrees(LEVEL_RECOVERY_FINE_ROLL_STEP_RAD)),
-            "fine_roll_steps": int(LEVEL_RECOVERY_FINE_ROLL_STEPS),
-            "success_count": int(recovery_success_count),
-            "fail_count": int(recovery_fail_count),
-            "events": recovery_events,
-        },
-        "reanchor_checks": {
-            "xy_tol": float(REANCHOR_XY_TOL),
-            "descent_max_rise": float(DESCENT_MAX_RISE),
-            "reject_count": int(reanchor_reject_count),
-            "events": reanchor_reject_events,
-        },
+        "gate_blocked": bool(recovery_fail_count > 0),
+        "level_recovery": level_recovery_summary,
+        "local_replan": local_replan_summary,
         "pre_close_replan": pre_close_replan,
         "close_skipped_by_pre_close_gate": bool(close_skipped),
         "descent_wps_planned": int(n_descent_wps),
-        "descent_wps_used": int(descent_wps_generated),
         "descent_wps_executed": int(len(descent_wps)),
-        "descent_wps_padded": 0,
         "gripper_open": float(args.gripper_open),
         "gripper_close": float(args.gripper_close),
         "cube_shift_norm": float(np.linalg.norm(cube_shift)),
@@ -864,9 +967,12 @@ def main() -> None:
         },
         "dz_jaw_phase_stats": phase_dz,
         "dz_jaw_analysis": dz_analysis,
-        "dz_jaw_trace": dz_rows,
+        "dz_jaw_trace_count": int(len(dz_rows)),
+        "dz_jaw_trace_tail": dz_rows[-60:],
         "approach_png_dir": str(png_dir),
     }
+    if args.summary_full_trace:
+        summary["dz_jaw_trace"] = dz_rows
     (out_root / "light_summary.json").write_text(
         json.dumps(summary, indent=2), encoding="utf-8"
     )
