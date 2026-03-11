@@ -60,6 +60,35 @@ def save_rgb_png(arr, path: Path) -> None:
         imageio.imwrite(path, arr)
 
 
+def quat_multiply(q1, q2):
+    w1, x1, y1, z1 = q1
+    w2, x2, y2, z2 = q2
+    q = np.array(
+        [
+            w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
+            w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+            w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+            w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
+        ],
+        dtype=np.float32,
+    )
+    n = np.linalg.norm(q)
+    return (q / (n + 1e-9)).tolist()
+
+
+def quat_from_yaw(yaw):
+    cy = float(np.cos(yaw * 0.5))
+    sy = float(np.sin(yaw * 0.5))
+    return [cy, 0.0, 0.0, sy]
+
+
+def yaw_from_quat_x_axis(q):
+    # Estimate yaw by projecting ee local X axis onto world XY.
+    r = quat_to_rotmat(np.array(q, dtype=np.float64))
+    x_axis_world = r @ np.array([1.0, 0.0, 0.0], dtype=np.float64)
+    return float(np.arctan2(x_axis_world[1], x_axis_world[0]))
+
+
 def find_so101_xml(user_xml: str | None) -> Path | None:
     if user_xml:
         p = Path(user_xml)
@@ -116,6 +145,11 @@ HOME_DEG = np.array([0.0, -30.0, 90.0, -60.0, 0.0, 0.0], dtype=np.float32)
 KP = np.array([500.0, 500.0, 400.0, 400.0, 300.0, 200.0], dtype=np.float32)
 KV = np.array([50.0, 50.0, 40.0, 40.0, 30.0, 20.0], dtype=np.float32)
 CUBE_SIZE = (0.03, 0.03, 0.03)
+QUAT_START_WP = 2
+LEVEL_TOLERANCE = 0.004
+LEVEL_HOLD_STEPS = 8
+EXPORT_APPROACH_TAIL = 10
+EXPORT_LEVEL_TAIL = 8
 
 
 def phase_stats(rows):
@@ -160,7 +194,12 @@ def main() -> None:
     ap.add_argument("--grasp-offset-y", type=float, default=0.0)
     ap.add_argument("--grasp-offset-z", type=float, default=-0.01)
     ap.add_argument("--approach-z", type=float, default=0.012)
-    ap.add_argument("--export-last-frames", type=int, default=10)
+    ap.add_argument(
+        "--quat-mode",
+        choices=["none", "pregrasp_flatten_yaw"],
+        default="none",
+        help="none: default IK; pregrasp_flatten_yaw: enforce flattened-yaw quat on late descent/approach",
+    )
     args = ap.parse_args()
 
     xml = find_so101_xml(args.xml)
@@ -195,12 +234,11 @@ def main() -> None:
         fov=38,
         GUI=False,
     )
-    # Put side camera on the Y-axis of cube and closer than old default,
-    # so jaw relative height is easier to judge with less perspective distortion.
-    side_pos = (float(args.cube_x), float(args.cube_y - 0.22), float(args.cube_z + 0.06))
-    side_lookat = (float(args.cube_x), float(args.cube_y), float(args.cube_z + 0.02))
+    # Side camera: keep axis-aligned view but move farther so full arm fits in FOV.
+    side_pos = (float(args.cube_x), float(args.cube_y - 0.32), float(args.cube_z + 0.09))
+    side_lookat = (float(args.cube_x), float(args.cube_y), float(args.cube_z + 0.03))
     cam_side = scene.add_camera(
-        res=(640, 480), pos=side_pos, lookat=side_lookat, fov=45, GUI=False
+        res=(640, 480), pos=side_pos, lookat=side_lookat, fov=50, GUI=False
     )
     scene.build()
 
@@ -234,12 +272,12 @@ def main() -> None:
         for _ in range(args.settle_steps):
             scene.step()
 
-    def solve_ik_seeded(pos, grip_deg, seed_rad):
+    def solve_ik_seeded(pos, grip_deg, seed_rad, quat_target=None):
         q = to_numpy(
             so101.inverse_kinematics(
                 link=ee,
                 pos=np.array(pos, dtype=np.float32),
-                quat=None,
+                quat=quat_target,
                 init_qpos=seed_rad,
                 max_solver_iters=50,
                 damping=0.02,
@@ -252,17 +290,63 @@ def main() -> None:
 
     # trajectory (same skeleton as 03/12)
     pos_pre = cube_init + off + np.array([0.0, 0.0, 0.10], dtype=np.float64)
-    q_pre = solve_ik_seeded(pos_pre, args.gripper_open, home_rad)
+    q_pre = solve_ik_seeded(pos_pre, args.gripper_open, home_rad, quat_target=None)
     prev_rad = np.deg2rad(np.array(q_pre, dtype=np.float32))
+    quat_ref = None
+    quat_ref_source = "disabled"
+    if args.quat_mode == "pregrasp_flatten_yaw":
+        # Build leveling-oriented quat_ref from pre_grasp reachable pose.
+        q_pre_rad = np.deg2rad(np.array(q_pre, dtype=np.float32))
+        so101.set_qpos(q_pre_rad)
+        so101.control_dofs_position(q_pre_rad, dof_idx)
+        for _ in range(5):
+            scene.step()
+        quat_pre = [float(v) for v in to_numpy(ee.get_quat()).tolist()]
+        # Keep yaw from current reachable branch, flatten roll/pitch to down-facing base.
+        yaw = yaw_from_quat_x_axis(quat_pre)
+        q_yaw = quat_from_yaw(yaw)
+        q_down = [0.0, 1.0, 0.0, 0.0]
+        quat_ref = quat_multiply(q_yaw, q_down)
+        quat_ref_source = "auto_pre_grasp_flatten_yaw"
+        # Restore home so the actual run still starts from reset_scene().
+        so101.set_qpos(home_rad)
+        so101.control_dofs_position(home_rad, dof_idx)
+        so101.zero_all_dofs_velocity()
+        for _ in range(5):
+            scene.step()
     n_descent_wps = 6
     descent_wps = []
+    gate_blocked = False
+    gate_block_wp = None
+    gate_block_dz = None
     for i in range(n_descent_wps):
         frac = (i + 1) / n_descent_wps
         z = 0.10 + (args.approach_z - 0.10) * frac
         pos = cube_init + off + np.array([0.0, 0.0, z], dtype=np.float64)
-        wp = solve_ik_seeded(pos, args.gripper_open, prev_rad)
+        use_ref_quat = args.quat_mode == "pregrasp_flatten_yaw" and i >= QUAT_START_WP
+        wp = solve_ik_seeded(
+            pos,
+            args.gripper_open,
+            prev_rad,
+            quat_target=quat_ref if use_ref_quat else None,
+        )
+        # Gate: from quat-start waypoint onward, only allow deeper descend when dz_jaw is within tolerance.
+        if args.quat_mode == "pregrasp_flatten_yaw" and i >= QUAT_START_WP:
+            q_wp_rad = np.deg2rad(np.array(wp, dtype=np.float32))
+            so101.set_qpos(q_wp_rad)
+            so101.control_dofs_position(q_wp_rad, dof_idx)
+            for _ in range(3):
+                scene.step()
+            dz_wp = float(to_numpy(moving_jaw.get_pos())[2] - to_numpy(fixed_jaw.get_pos())[2])
+            if abs(dz_wp) > LEVEL_TOLERANCE:
+                gate_blocked = True
+                gate_block_wp = int(i)
+                gate_block_dz = float(dz_wp)
+                break
         descent_wps.append(wp)
         prev_rad = np.deg2rad(np.array(wp, dtype=np.float32))
+    if not descent_wps:
+        raise RuntimeError("No descent waypoint generated; check IK/gate settings")
     q_approach = descent_wps[-1]
 
     q_close = q_approach.copy()
@@ -276,7 +360,12 @@ def main() -> None:
         frac = (i + 1) / n_lift_wps
         z = args.approach_z + (0.15 - args.approach_z) * frac
         pos = cube_init + off + np.array([0.0, 0.0, z], dtype=np.float64)
-        wp = solve_ik_seeded(pos, args.gripper_close, prev_rad)
+        wp = solve_ik_seeded(
+            pos,
+            args.gripper_close,
+            prev_rad,
+            quat_target=quat_ref if args.quat_mode == "pregrasp_flatten_yaw" else None,
+        )
         lift_wps.append(wp)
         prev_rad = np.deg2rad(np.array(wp, dtype=np.float32))
 
@@ -286,6 +375,9 @@ def main() -> None:
     n_move = max(15, args.trial_steps // 8)
     traj += lerp(home_deg.copy(), q_pre, n_move)
     phases += ["move_pre"] * n_move
+    if LEVEL_HOLD_STEPS > 0:
+        traj += [q_pre.copy() for _ in range(LEVEL_HOLD_STEPS)]
+        phases += ["pre_grasp_level"] * LEVEL_HOLD_STEPS
     steps_per_desc = max(3, args.trial_steps // (8 * n_descent_wps))
     prev = q_pre
     for wp in descent_wps:
@@ -317,8 +409,11 @@ def main() -> None:
     dz0 = float(to_numpy(moving_jaw.get_pos())[2] - to_numpy(fixed_jaw.get_pos())[2])
     dz_rows.append({"frame_idx": -1, "phase": "initial_after_reset", "dz_jaw": dz0})
     frame_buffer = []
-    keep = [i for i, p in enumerate(phases) if p == "approach"]
-    keep = set(keep[-args.export_last_frames :])
+    keep_approach = [i for i, p in enumerate(phases) if p == "approach"]
+    keep_approach = set(keep_approach[-EXPORT_APPROACH_TAIL :])
+    keep_level = [i for i, p in enumerate(phases) if p == "pre_grasp_level"]
+    keep_level = set(keep_level[-EXPORT_LEVEL_TAIL :])
+    keep = keep_approach | keep_level
     for i, q_deg in enumerate(traj):
         so101.control_dofs_position(
             np.deg2rad(np.array(q_deg, dtype=np.float32)), dof_idx
@@ -330,6 +425,7 @@ def main() -> None:
             frame_buffer.append(
                 (
                     i,
+                    phases[i],
                     np.concatenate(
                         [render_camera(cam_top), render_camera(cam_side)], axis=1
                     ),
@@ -337,8 +433,8 @@ def main() -> None:
             )
 
     png_dir.mkdir(parents=True, exist_ok=True)
-    for i, img in frame_buffer:
-        save_rgb_png(img, png_dir / f"f{i:03d}_approach.png")
+    for i, phase, img in frame_buffer:
+        save_rgb_png(img, png_dir / f"f{i:03d}_{phase}.png")
 
     cube_pos_final = to_numpy(cube.get_pos())
     cube_shift = cube_pos_final - cube_init
@@ -372,12 +468,26 @@ def main() -> None:
         "offset_xyz": off.tolist(),
         "settle_steps": int(args.settle_steps),
         "approach_z": float(args.approach_z),
+        "quat_mode": args.quat_mode,
+        "quat_ref_source": quat_ref_source,
+        "quat_ref": quat_ref,
+        "quat_start_wp": int(QUAT_START_WP),
+        "level_tolerance": float(LEVEL_TOLERANCE),
+        "level_hold_steps": int(LEVEL_HOLD_STEPS),
+        "gate_blocked": bool(gate_blocked),
+        "gate_block_wp": gate_block_wp,
+        "gate_block_dz": gate_block_dz,
+        "descent_wps_used": int(len(descent_wps)),
         "gripper_open": float(args.gripper_open),
         "gripper_close": float(args.gripper_close),
         "cube_shift_norm": float(np.linalg.norm(cube_shift)),
         "cube_shift_xyz": [float(v) for v in cube_shift.tolist()],
         "cube_tilt_deg": float(box_tilt_deg(to_numpy(cube.get_quat()))),
         "camera_side_pose": {"pos": list(side_pos), "lookat": list(side_lookat)},
+        "export_frames": {
+            "approach_tail": int(EXPORT_APPROACH_TAIL),
+            "pre_grasp_level_tail": int(EXPORT_LEVEL_TAIL),
+        },
         "dz_jaw_phase_stats": phase_dz,
         "dz_jaw_analysis": dz_analysis,
         "dz_jaw_trace": dz_rows,
