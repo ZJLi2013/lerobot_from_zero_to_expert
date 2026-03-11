@@ -118,6 +118,24 @@ KV = np.array([50.0, 50.0, 40.0, 40.0, 30.0, 20.0], dtype=np.float32)
 CUBE_SIZE = (0.03, 0.03, 0.03)
 
 
+def phase_stats(rows):
+    if not rows:
+        return {}
+    by_phase = {}
+    for r in rows:
+        by_phase.setdefault(r["phase"], []).append(float(r["dz_jaw"]))
+    out = {}
+    for ph, vals in by_phase.items():
+        arr = np.array(vals, dtype=np.float64)
+        out[ph] = {
+            "count": int(arr.size),
+            "mean": float(arr.mean()),
+            "min": float(arr.min()),
+            "max": float(arr.max()),
+        }
+    return out
+
+
 def main() -> None:
     ensure_display()
     ap = argparse.ArgumentParser(description="SO-101 minimal light grasp")
@@ -177,8 +195,12 @@ def main() -> None:
         fov=38,
         GUI=False,
     )
+    # Put side camera on the Y-axis of cube and closer than old default,
+    # so jaw relative height is easier to judge with less perspective distortion.
+    side_pos = (float(args.cube_x), float(args.cube_y - 0.22), float(args.cube_z + 0.06))
+    side_lookat = (float(args.cube_x), float(args.cube_y), float(args.cube_z + 0.02))
     cam_side = scene.add_camera(
-        res=(640, 480), pos=(0.5, -0.4, 0.3), lookat=(0.15, 0.0, 0.1), fov=45, GUI=False
+        res=(640, 480), pos=side_pos, lookat=side_lookat, fov=45, GUI=False
     )
     scene.build()
 
@@ -188,6 +210,8 @@ def main() -> None:
     home_deg = HOME_DEG[: so101.n_dofs]
     home_rad = np.deg2rad(home_deg)
     ee = so101.get_link("grasp_center")
+    fixed_jaw = so101.get_link("gripper")
+    moving_jaw = so101.get_link("moving_jaw_so101_v1")
     cube_init = np.array([args.cube_x, args.cube_y, args.cube_z], dtype=np.float64)
     off = np.array(
         [args.grasp_offset_x, args.grasp_offset_y, args.grasp_offset_z],
@@ -289,6 +313,9 @@ def main() -> None:
     png_dir = out_root / "approach_debug_pngs"
 
     reset_scene()
+    dz_rows = []
+    dz0 = float(to_numpy(moving_jaw.get_pos())[2] - to_numpy(fixed_jaw.get_pos())[2])
+    dz_rows.append({"frame_idx": -1, "phase": "initial_after_reset", "dz_jaw": dz0})
     frame_buffer = []
     keep = [i for i, p in enumerate(phases) if p == "approach"]
     keep = set(keep[-args.export_last_frames :])
@@ -297,6 +324,8 @@ def main() -> None:
             np.deg2rad(np.array(q_deg, dtype=np.float32)), dof_idx
         )
         scene.step()
+        dz = float(to_numpy(moving_jaw.get_pos())[2] - to_numpy(fixed_jaw.get_pos())[2])
+        dz_rows.append({"frame_idx": int(i), "phase": phases[i], "dz_jaw": dz})
         if i in keep:
             frame_buffer.append(
                 (
@@ -313,6 +342,29 @@ def main() -> None:
 
     cube_pos_final = to_numpy(cube.get_pos())
     cube_shift = cube_pos_final - cube_init
+    phase_dz = phase_stats(dz_rows)
+    approach_rows = [r for r in dz_rows if r["phase"] == "approach"]
+    move_rows = [r for r in dz_rows if r["phase"] == "move_pre"]
+    dz_analysis = {}
+    if move_rows and approach_rows:
+        move_start = float(move_rows[0]["dz_jaw"])
+        move_end = float(move_rows[-1]["dz_jaw"])
+        app_start = float(approach_rows[0]["dz_jaw"])
+        app_end = float(approach_rows[-1]["dz_jaw"])
+        x = np.arange(len(approach_rows), dtype=np.float64)
+        y = np.array([r["dz_jaw"] for r in approach_rows], dtype=np.float64)
+        slope = float(np.polyfit(x, y, 1)[0]) if len(approach_rows) >= 2 else 0.0
+        dz_analysis = {
+            "move_pre_start": move_start,
+            "move_pre_end": move_end,
+            "approach_start": app_start,
+            "approach_end": app_end,
+            "delta_move_pre": float(move_end - move_start),
+            "delta_approach": float(app_end - app_start),
+            "approach_slope_per_step": slope,
+            # simple heuristic: |delta_approach| > 1 mm and trend sign matches
+            "approach_accumulates": bool(abs(app_end - app_start) > 1e-3 and np.sign(app_end - app_start) == np.sign(slope)),
+        }
     summary = {
         "exp_id": args.exp_id,
         "xml_path": str(xml),
@@ -325,6 +377,10 @@ def main() -> None:
         "cube_shift_norm": float(np.linalg.norm(cube_shift)),
         "cube_shift_xyz": [float(v) for v in cube_shift.tolist()],
         "cube_tilt_deg": float(box_tilt_deg(to_numpy(cube.get_quat()))),
+        "camera_side_pose": {"pos": list(side_pos), "lookat": list(side_lookat)},
+        "dz_jaw_phase_stats": phase_dz,
+        "dz_jaw_analysis": dz_analysis,
+        "dz_jaw_trace": dz_rows,
         "approach_png_dir": str(png_dir),
     }
     (out_root / "light_summary.json").write_text(
