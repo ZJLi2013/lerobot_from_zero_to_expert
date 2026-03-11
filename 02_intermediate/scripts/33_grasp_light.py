@@ -149,7 +149,6 @@ QUAT_START_WP = 2
 LEVEL_TOLERANCE = 0.004
 LEVEL_HOLD_STEPS = 8
 EXPORT_APPROACH_TAIL = 10
-EXPORT_LEVEL_TAIL = 8
 
 
 def phase_stats(rows):
@@ -347,6 +346,14 @@ def main() -> None:
         prev_rad = np.deg2rad(np.array(wp, dtype=np.float32))
     if not descent_wps:
         raise RuntimeError("No descent waypoint generated; check IK/gate settings")
+    descent_wps_generated = int(len(descent_wps))
+    # Keep a full-length approach phase: when gate blocks deeper descend,
+    # repeat the last safe waypoint for remaining descent slots.
+    descent_wps_padded = 0
+    if gate_blocked and len(descent_wps) < n_descent_wps:
+        last_safe_wp = descent_wps[-1].copy()
+        descent_wps_padded = int(n_descent_wps - len(descent_wps))
+        descent_wps += [last_safe_wp.copy() for _ in range(descent_wps_padded)]
     q_approach = descent_wps[-1]
 
     q_close = q_approach.copy()
@@ -411,9 +418,13 @@ def main() -> None:
     frame_buffer = []
     keep_approach = [i for i, p in enumerate(phases) if p == "approach"]
     keep_approach = set(keep_approach[-EXPORT_APPROACH_TAIL :])
-    keep_level = [i for i, p in enumerate(phases) if p == "pre_grasp_level"]
-    keep_level = set(keep_level[-EXPORT_LEVEL_TAIL :])
-    keep = keep_approach | keep_level
+    if args.quat_mode == "pregrasp_flatten_yaw":
+        # For flattened-yaw runs, keep the full leveling stage for diagnosis.
+        keep_level = {i for i, p in enumerate(phases) if p == "pre_grasp_level"}
+        keep = keep_approach | keep_level
+    else:
+        # Baseline run: only keep the final approach tail.
+        keep = keep_approach
     for i, q_deg in enumerate(traj):
         so101.control_dofs_position(
             np.deg2rad(np.array(q_deg, dtype=np.float32)), dof_idx
@@ -477,7 +488,10 @@ def main() -> None:
         "gate_blocked": bool(gate_blocked),
         "gate_block_wp": gate_block_wp,
         "gate_block_dz": gate_block_dz,
-        "descent_wps_used": int(len(descent_wps)),
+        "descent_wps_planned": int(n_descent_wps),
+        "descent_wps_used": int(descent_wps_generated),
+        "descent_wps_executed": int(len(descent_wps)),
+        "descent_wps_padded": int(descent_wps_padded),
         "gripper_open": float(args.gripper_open),
         "gripper_close": float(args.gripper_close),
         "cube_shift_norm": float(np.linalg.norm(cube_shift)),
@@ -486,7 +500,9 @@ def main() -> None:
         "camera_side_pose": {"pos": list(side_pos), "lookat": list(side_lookat)},
         "export_frames": {
             "approach_tail": int(EXPORT_APPROACH_TAIL),
-            "pre_grasp_level_tail": int(EXPORT_LEVEL_TAIL),
+            "pre_grasp_level_all_when_flatten_yaw": bool(
+                args.quat_mode == "pregrasp_flatten_yaw"
+            ),
         },
         "dz_jaw_phase_stats": phase_dz,
         "dz_jaw_analysis": dz_analysis,
