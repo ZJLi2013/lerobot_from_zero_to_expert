@@ -579,6 +579,33 @@ def main() -> None:
                             "roll_delta_deg": float(np.degrees(best_feasible["roll_delta_rad"])),
                         }
                     )
+                    # Leveling succeeded — replan from this leveled pose to pre-close target.
+                    replan_seed = np.deg2rad(np.array(wp, dtype=np.float32))
+                    wp_replan = solve_ik_seeded(
+                        pre_close_target,
+                        args.gripper_open,
+                        replan_seed,
+                        quat_target=quat_ref,
+                    )
+                    replan_eval = evaluate_qdeg_against_target(
+                        wp_replan, pre_close_target, settle_steps=3
+                    )
+                    pure_replan_events.append(
+                        {
+                            "trigger_wp_idx": int(i),
+                            "leveled_dz": float(dz_wp),
+                            "target_pos": [float(v) for v in pre_close_target.tolist()],
+                            "dz_abs": float(abs(replan_eval["dz_inner_surface"])),
+                            "gc_pos_error": float(replan_eval["gc_pos_error"]),
+                            "gc_xy_drift": float(replan_eval["gc_xy_drift"]),
+                            "mid_surface_xy_drift": float(replan_eval["mid_surface_xy_drift"]),
+                        }
+                    )
+                    descent_wps.append(wp)
+                    replan_wps.append(wp_replan)
+                    prev_wp_deg = np.array(wp_replan, dtype=np.float64)
+                    prev_rad = np.deg2rad(np.array(wp_replan, dtype=np.float32))
+                    break
                 else:
                     recovery_fail_count += 1
                     recovery_events.append(
@@ -590,35 +617,9 @@ def main() -> None:
                             "best_roll_delta_deg": float(np.degrees(best["roll_delta_rad"])),
                         }
                     )
-                    # No safety fallback: keep descending using the best recovered pose
-                    # even if it does not meet the dz threshold.
                     wp = best["wp"]
                     dz_wp = float(best["dz"])
                     quat_ref = best["quat"]
-            # Pure replanning: directly IK to pre-close target.
-            wp_replan = solve_ik_seeded(
-                pre_close_target,
-                args.gripper_open,
-                prev_rad,
-                quat_target=quat_ref if use_ref_quat else None,
-            )
-            replan_eval = evaluate_qdeg_against_target(
-                wp_replan, pre_close_target, settle_steps=3
-            )
-            pure_replan_events.append(
-                {
-                    "trigger_wp_idx": int(i),
-                    "target_pos": [float(v) for v in pre_close_target.tolist()],
-                    "dz_abs": float(abs(replan_eval["dz_inner_surface"])),
-                    "gc_pos_error": float(replan_eval["gc_pos_error"]),
-                    "gc_xy_drift": float(replan_eval["gc_xy_drift"]),
-                    "mid_surface_xy_drift": float(replan_eval["mid_surface_xy_drift"]),
-                }
-            )
-            replan_wps.append(wp_replan)
-            prev_wp_deg = np.array(wp_replan, dtype=np.float64)
-            prev_rad = np.deg2rad(np.array(wp_replan, dtype=np.float32))
-            break
         descent_wps.append(wp)
         prev_wp_deg = np.array(wp, dtype=np.float64)
         prev_rad = np.deg2rad(np.array(wp, dtype=np.float32))
