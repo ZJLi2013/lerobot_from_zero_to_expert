@@ -82,6 +82,12 @@ def quat_from_yaw(yaw):
     return [cy, 0.0, 0.0, sy]
 
 
+def quat_from_roll(roll):
+    cr = float(np.cos(roll * 0.5))
+    sr = float(np.sin(roll * 0.5))
+    return [cr, sr, 0.0, 0.0]
+
+
 def yaw_from_quat_x_axis(q):
     # Estimate yaw by projecting ee local X axis onto world XY.
     r = quat_to_rotmat(np.array(q, dtype=np.float64))
@@ -149,6 +155,10 @@ QUAT_START_WP = 2
 LEVEL_TOLERANCE = 0.004
 LEVEL_HOLD_STEPS = 8
 EXPORT_APPROACH_TAIL = 10
+LEVEL_RECOVERY_ROLL_STEP_RAD = np.deg2rad(2.0)
+LEVEL_RECOVERY_MAX_ROLL_STEPS = 8
+LEVEL_RECOVERY_FINE_ROLL_STEP_RAD = np.deg2rad(1.0)
+LEVEL_RECOVERY_FINE_ROLL_STEPS = 2
 
 
 def phase_stats(rows):
@@ -287,6 +297,14 @@ def main() -> None:
             q_deg[5] = grip_deg
         return q_deg
 
+    def measure_dz_for_qdeg(q_deg, settle_steps=3):
+        q_rad = np.deg2rad(np.array(q_deg, dtype=np.float32))
+        so101.set_qpos(q_rad)
+        so101.control_dofs_position(q_rad, dof_idx)
+        for _ in range(settle_steps):
+            scene.step()
+        return float(to_numpy(moving_jaw.get_pos())[2] - to_numpy(fixed_jaw.get_pos())[2])
+
     # trajectory (same skeleton as 03/12)
     pos_pre = cube_init + off + np.array([0.0, 0.0, 0.10], dtype=np.float64)
     q_pre = solve_ik_seeded(pos_pre, args.gripper_open, home_rad, quat_target=None)
@@ -318,6 +336,9 @@ def main() -> None:
     gate_blocked = False
     gate_block_wp = None
     gate_block_dz = None
+    recovery_success_count = 0
+    recovery_fail_count = 0
+    recovery_events = []
     for i in range(n_descent_wps):
         frac = (i + 1) / n_descent_wps
         z = 0.10 + (args.approach_z - 0.10) * frac
@@ -331,17 +352,104 @@ def main() -> None:
         )
         # Gate: from quat-start waypoint onward, only allow deeper descend when dz_jaw is within tolerance.
         if args.quat_mode == "pregrasp_flatten_yaw" and i >= QUAT_START_WP:
-            q_wp_rad = np.deg2rad(np.array(wp, dtype=np.float32))
-            so101.set_qpos(q_wp_rad)
-            so101.control_dofs_position(q_wp_rad, dof_idx)
-            for _ in range(3):
-                scene.step()
-            dz_wp = float(to_numpy(moving_jaw.get_pos())[2] - to_numpy(fixed_jaw.get_pos())[2])
+            dz_wp = measure_dz_for_qdeg(wp)
             if abs(dz_wp) > LEVEL_TOLERANCE:
-                gate_blocked = True
-                gate_block_wp = int(i)
-                gate_block_dz = float(dz_wp)
-                break
+                best = {
+                    "wp": wp,
+                    "dz": float(dz_wp),
+                    "roll_delta_rad": 0.0,
+                    "quat": quat_ref,
+                }
+                recovered = False
+                recovered_choice = None
+                if quat_ref is not None:
+                    for step in range(1, LEVEL_RECOVERY_MAX_ROLL_STEPS + 1):
+                        for sign in (1.0, -1.0):
+                            roll_delta = float(sign * step * LEVEL_RECOVERY_ROLL_STEP_RAD)
+                            q_try = quat_multiply(
+                                quat_from_roll(roll_delta), quat_ref
+                            )
+                            wp_try = solve_ik_seeded(
+                                pos,
+                                args.gripper_open,
+                                prev_rad,
+                                quat_target=q_try,
+                            )
+                            dz_try = measure_dz_for_qdeg(wp_try)
+                            if abs(dz_try) < abs(best["dz"]):
+                                best = {
+                                    "wp": wp_try,
+                                    "dz": float(dz_try),
+                                    "roll_delta_rad": float(roll_delta),
+                                    "quat": q_try,
+                                }
+                            if abs(dz_try) <= LEVEL_TOLERANCE:
+                                recovered_choice = {
+                                    "wp": wp_try,
+                                    "dz": float(dz_try),
+                                    "roll_delta_rad": float(roll_delta),
+                                    "quat": q_try,
+                                }
+                                recovered = True
+                                break
+                        if recovered:
+                            break
+                if recovered:
+                    # Fine search around coarse feasible roll with 1-degree resolution.
+                    best_feasible = dict(recovered_choice)
+                    base_delta = float(recovered_choice["roll_delta_rad"])
+                    for step in range(1, LEVEL_RECOVERY_FINE_ROLL_STEPS + 1):
+                        for sign in (1.0, -1.0):
+                            roll_delta_f = float(
+                                base_delta + sign * step * LEVEL_RECOVERY_FINE_ROLL_STEP_RAD
+                            )
+                            q_try_f = quat_multiply(
+                                quat_from_roll(roll_delta_f), quat_ref
+                            )
+                            wp_try_f = solve_ik_seeded(
+                                pos,
+                                args.gripper_open,
+                                prev_rad,
+                                quat_target=q_try_f,
+                            )
+                            dz_try_f = measure_dz_for_qdeg(wp_try_f)
+                            if (
+                                abs(dz_try_f) <= LEVEL_TOLERANCE
+                                and abs(dz_try_f) < abs(best_feasible["dz"])
+                            ):
+                                best_feasible = {
+                                    "wp": wp_try_f,
+                                    "dz": float(dz_try_f),
+                                    "roll_delta_rad": float(roll_delta_f),
+                                    "quat": q_try_f,
+                                }
+                    wp = best_feasible["wp"]
+                    dz_wp = float(best_feasible["dz"])
+                    quat_ref = best_feasible["quat"]
+                    recovery_success_count += 1
+                    recovery_events.append(
+                        {
+                            "wp_idx": int(i),
+                            "recovered": True,
+                            "dz_after": float(dz_wp),
+                            "roll_delta_deg": float(np.degrees(best_feasible["roll_delta_rad"])),
+                        }
+                    )
+                else:
+                    recovery_fail_count += 1
+                    recovery_events.append(
+                        {
+                            "wp_idx": int(i),
+                            "recovered": False,
+                            "dz_before": float(dz_wp),
+                            "best_dz": float(best["dz"]),
+                            "best_roll_delta_deg": float(np.degrees(best["roll_delta_rad"])),
+                        }
+                    )
+                    gate_blocked = True
+                    gate_block_wp = int(i)
+                    gate_block_dz = float(best["dz"])
+                    break
         descent_wps.append(wp)
         prev_rad = np.deg2rad(np.array(wp, dtype=np.float32))
     if not descent_wps:
@@ -488,6 +596,15 @@ def main() -> None:
         "gate_blocked": bool(gate_blocked),
         "gate_block_wp": gate_block_wp,
         "gate_block_dz": gate_block_dz,
+        "level_recovery": {
+            "roll_step_deg": float(np.degrees(LEVEL_RECOVERY_ROLL_STEP_RAD)),
+            "max_roll_steps": int(LEVEL_RECOVERY_MAX_ROLL_STEPS),
+            "fine_roll_step_deg": float(np.degrees(LEVEL_RECOVERY_FINE_ROLL_STEP_RAD)),
+            "fine_roll_steps": int(LEVEL_RECOVERY_FINE_ROLL_STEPS),
+            "success_count": int(recovery_success_count),
+            "fail_count": int(recovery_fail_count),
+            "events": recovery_events,
+        },
         "descent_wps_planned": int(n_descent_wps),
         "descent_wps_used": int(descent_wps_generated),
         "descent_wps_executed": int(len(descent_wps)),
