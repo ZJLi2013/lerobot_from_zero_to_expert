@@ -9,12 +9,72 @@ the jaw midpoint ends up at some position J.  We want J ≈ cube center.
 """
 import argparse
 import numpy as np
+import xml.etree.ElementTree as ET
 import genesis as gs
 
 
 def to_np(t):
     arr = t.cpu().numpy() if hasattr(t, "cpu") else np.array(t)
     return arr[0] if arr.ndim > 1 else arr
+
+
+def parse_vec(s):
+    return np.array([float(v) for v in s.split()], dtype=np.float64)
+
+
+def normalize(v):
+    v = np.array(v, dtype=np.float64)
+    n = np.linalg.norm(v)
+    if n < 1e-12:
+        return np.zeros_like(v)
+    return v / n
+
+
+def quat_to_rotmat(q):
+    w, x, y, z = q
+    return np.array(
+        [
+            [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+            [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+            [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+        ],
+        dtype=np.float64,
+    )
+
+
+def transform_point(link_pos, link_quat, local_pos):
+    return np.array(link_pos, dtype=np.float64) + quat_to_rotmat(link_quat) @ np.array(
+        local_pos, dtype=np.float64
+    )
+
+
+def load_jaw_box_config(xml_path):
+    tree = ET.parse(xml_path)
+    root = tree.getroot()
+    worldbody = root.find("worldbody")
+    if worldbody is None:
+        raise RuntimeError("worldbody not found in XML")
+    jaw_boxes = {}
+
+    def walk_body(body):
+        body_name = body.attrib.get("name")
+        for geom in body.findall("geom"):
+            geom_name = geom.attrib.get("name")
+            if geom_name in {"fixed_jaw_box", "moving_jaw_box"}:
+                jaw_boxes[geom_name] = {
+                    "body_name": body_name,
+                    "pos": parse_vec(geom.attrib["pos"]),
+                    "size": parse_vec(geom.attrib["size"]),
+                }
+        for child in body.findall("body"):
+            walk_body(child)
+
+    for body in worldbody.findall("body"):
+        walk_body(body)
+    missing = {"fixed_jaw_box", "moving_jaw_box"} - set(jaw_boxes.keys())
+    if missing:
+        raise RuntimeError(f"jaw box geom not found in XML: {sorted(missing)}")
+    return jaw_boxes
 
 
 def main():
@@ -33,6 +93,7 @@ def main():
     scene.add_entity(gs.morphs.Box(size=(0.03, 0.03, 0.03), pos=(0.15, 0.0, args.cube_z)))
     so101 = scene.add_entity(gs.morphs.MJCF(file=args.xml, pos=(0, 0, 0)))
     scene.build()
+    jaw_box_cfg = load_jaw_box_config(args.xml)
 
     home_rad = np.deg2rad([0, -30, 90, -60, 0, 0]).astype(np.float32)
     dof_idx = np.arange(6)
@@ -42,6 +103,20 @@ def main():
     gc = so101.get_link("grasp_center")
     gripper_link = so101.get_link("gripper")
     mj = so101.get_link("moving_jaw_so101_v1")
+
+    def get_jaw_box_world(link, cfg):
+        link_pos = to_np(link.get_pos())
+        link_quat = to_np(link.get_quat())
+        center_world = transform_point(link_pos, link_quat, cfg["pos"])
+        rot = quat_to_rotmat(link_quat)
+        thickness_axis_local = np.zeros(3, dtype=np.float64)
+        thickness_axis_local[int(np.argmin(cfg["size"]))] = 1.0
+        thickness_axis_world = normalize(rot @ thickness_axis_local)
+        return {
+            "center_world": center_world,
+            "thickness_axis_world": thickness_axis_world,
+            "half_thickness": float(np.min(cfg["size"])),
+        }
 
     cube_center = np.array([0.16, 0.0, args.cube_z])
     cube_top = args.cube_z + 0.015
@@ -74,7 +149,17 @@ def main():
         grip_pos = to_np(gripper_link.get_pos())
         mj_pos = to_np(mj.get_pos())
         gc_err = np.linalg.norm(gc_pos - target)
-        jaw_mid_z = (grip_pos[2] + mj_pos[2]) / 2
+        fixed_box = get_jaw_box_world(gripper_link, jaw_box_cfg["fixed_jaw_box"])
+        moving_box = get_jaw_box_world(mj, jaw_box_cfg["moving_jaw_box"])
+        fixed_axis = fixed_box["thickness_axis_world"]
+        moving_axis = moving_box["thickness_axis_world"]
+        fixed_to_moving = moving_box["center_world"] - fixed_box["center_world"]
+        moving_to_fixed = fixed_box["center_world"] - moving_box["center_world"]
+        fixed_inward = fixed_axis * np.sign(np.dot(fixed_to_moving, fixed_axis) or 1.0)
+        moving_inward = moving_axis * np.sign(np.dot(moving_to_fixed, moving_axis) or 1.0)
+        fixed_inner = fixed_box["center_world"] + fixed_inward * fixed_box["half_thickness"]
+        moving_inner = moving_box["center_world"] + moving_inward * moving_box["half_thickness"]
+        jaw_mid_z = float(0.5 * (fixed_inner[2] + moving_inner[2]))
         gap = jaw_mid_z - cube_top
 
         if gc_err < 0.005:

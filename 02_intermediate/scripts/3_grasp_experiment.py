@@ -19,6 +19,7 @@ import os
 import subprocess
 import sys
 import time
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import numpy as np
@@ -72,6 +73,65 @@ def save_rgb_png(arr, path):
 
 def parse_csv_floats(text):
     return [float(x.strip()) for x in text.split(",") if x.strip()]
+
+
+def parse_vec(s):
+    return np.array([float(v) for v in s.split()], dtype=np.float64)
+
+
+def normalize(v):
+    v = np.array(v, dtype=np.float64)
+    n = np.linalg.norm(v)
+    if n < 1e-12:
+        return np.zeros_like(v)
+    return v / n
+
+
+def quat_to_rotmat(q):
+    w, x, y, z = q
+    return np.array(
+        [
+            [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+            [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+            [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+        ],
+        dtype=np.float64,
+    )
+
+
+def transform_point(link_pos, link_quat, local_pos):
+    return np.array(link_pos, dtype=np.float64) + quat_to_rotmat(link_quat) @ np.array(
+        local_pos, dtype=np.float64
+    )
+
+
+def load_jaw_box_config(xml_path):
+    tree = ET.parse(xml_path)
+    root = tree.getroot()
+    worldbody = root.find("worldbody")
+    if worldbody is None:
+        raise RuntimeError("worldbody not found in XML")
+    jaw_boxes = {}
+
+    def walk_body(body):
+        body_name = body.attrib.get("name")
+        for geom in body.findall("geom"):
+            geom_name = geom.attrib.get("name")
+            if geom_name in {"fixed_jaw_box", "moving_jaw_box"}:
+                jaw_boxes[geom_name] = {
+                    "body_name": body_name,
+                    "pos": parse_vec(geom.attrib["pos"]),
+                    "size": parse_vec(geom.attrib["size"]),
+                }
+        for child in body.findall("body"):
+            walk_body(child)
+
+    for body in worldbody.findall("body"):
+        walk_body(body)
+    missing = {"fixed_jaw_box", "moving_jaw_box"} - set(jaw_boxes.keys())
+    if missing:
+        raise RuntimeError(f"jaw box geom not found in XML: {sorted(missing)}")
+    return jaw_boxes
 
 
 def find_so101_xml(user_path=None):
@@ -292,6 +352,12 @@ def main():
         print("    pip install huggingface_hub   OR   --xml /path/to/so101.xml")
         sys.exit(1)
     print(f"  ✓ {xml_path}")
+    jaw_box_cfg = None
+    try:
+        jaw_box_cfg = load_jaw_box_config(xml_path)
+        print("  ✓ jaw_box reference loaded (fixed_jaw_box/moving_jaw_box)")
+    except Exception as e:
+        print(f"  ⚠ jaw_box reference unavailable, fallback to link-origin diagnostics: {e}")
 
     # ── [2] Genesis + Scene ───────────────────────────────────────────────────
     stage("2/6  Genesis + Scene")
@@ -469,6 +535,40 @@ def main():
             print(f"  TCP proxy unavailable: {e}")
     elif ee_name == "grasp_center":
         print("  grasp_center link detected: using fixed TCP from MJCF asset")
+
+    def get_jaw_box_world(link, cfg):
+        link_pos = to_numpy(link.get_pos())
+        link_quat = to_numpy(link.get_quat())
+        center_world = transform_point(link_pos, link_quat, cfg["pos"])
+        rot = quat_to_rotmat(link_quat)
+        thickness_axis_local = np.zeros(3, dtype=np.float64)
+        thickness_axis_local[int(np.argmin(cfg["size"]))] = 1.0
+        thickness_axis_world = normalize(rot @ thickness_axis_local)
+        return {
+            "center_world": center_world,
+            "thickness_axis_world": thickness_axis_world,
+            "half_thickness": float(np.min(cfg["size"])),
+        }
+
+    def jaw_midpoint_surface_z():
+        if jaw_box_cfg is None:
+            return None
+        try:
+            fixed_link = so101.get_link(jaw_box_cfg["fixed_jaw_box"]["body_name"])
+            moving_link = so101.get_link(jaw_box_cfg["moving_jaw_box"]["body_name"])
+            fixed_box = get_jaw_box_world(fixed_link, jaw_box_cfg["fixed_jaw_box"])
+            moving_box = get_jaw_box_world(moving_link, jaw_box_cfg["moving_jaw_box"])
+            fixed_axis = fixed_box["thickness_axis_world"]
+            moving_axis = moving_box["thickness_axis_world"]
+            fixed_to_moving = moving_box["center_world"] - fixed_box["center_world"]
+            moving_to_fixed = fixed_box["center_world"] - moving_box["center_world"]
+            fixed_inward = fixed_axis * np.sign(np.dot(fixed_to_moving, fixed_axis) or 1.0)
+            moving_inward = moving_axis * np.sign(np.dot(moving_to_fixed, moving_axis) or 1.0)
+            fixed_inner = fixed_box["center_world"] + fixed_inward * fixed_box["half_thickness"]
+            moving_inner = moving_box["center_world"] + moving_inward * moving_box["half_thickness"]
+            return float(0.5 * (fixed_inner[2] + moving_inner[2]))
+        except Exception:
+            return None
 
     # IK sanity check — verify the solution actually reaches the target
     try:
@@ -710,22 +810,29 @@ def main():
                 f"    [diag] TCP offset from target: [{tcp_pos[0]-pos_approach[0]:.4f}, {tcp_pos[1]-pos_approach[1]:.4f}, {tcp_pos[2]-pos_approach[2]:.4f}]"
             )
 
-            jaw_link_for_z = ee_link
-            if ee_name == "grasp_center":
-                try:
-                    jaw_link_for_z = so101.get_link("moving_jaw_so101_v1")
-                except Exception:
-                    jaw_link_for_z = ee_link
-            jaw_pos = to_numpy(jaw_link_for_z.get_pos())
             cube_center_now = to_numpy(cube.get_pos())
             cube_top_z = float(cube_center_now[2] + CUBE_SIZE[2] * 0.5)
+            jaw_mid_surface_z = jaw_midpoint_surface_z()
+            if jaw_mid_surface_z is None:
+                jaw_link_for_z = ee_link
+                if ee_name == "grasp_center":
+                    try:
+                        jaw_link_for_z = so101.get_link("moving_jaw_so101_v1")
+                    except Exception:
+                        jaw_link_for_z = ee_link
+                jaw_z_for_check = float(to_numpy(jaw_link_for_z.get_pos())[2])
+                jaw_reference = "link_origin_fallback"
+            else:
+                jaw_z_for_check = float(jaw_mid_surface_z)
+                jaw_reference = "inner_surface_midpoint"
             validation_diag = {
                 "ik_target": [float(v) for v in pos_approach.tolist()],
                 "tcp_actual": [float(v) for v in tcp_pos.tolist()],
                 "tcp_offset": [float(v) for v in (tcp_pos - pos_approach).tolist()],
-                "gripper_jaw_z": float(jaw_pos[2]),
+                "gripper_jaw_z": jaw_z_for_check,
                 "cube_top_z": cube_top_z,
-                "jaw_below_cube_top": bool(float(jaw_pos[2]) < cube_top_z),
+                "jaw_below_cube_top": bool(jaw_z_for_check < cube_top_z),
+                "jaw_z_reference": jaw_reference,
             }
             print(
                 "    [diag] quick-check: "

@@ -21,6 +21,7 @@ import os
 import subprocess
 import sys
 import time
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import numpy as np
@@ -43,6 +44,65 @@ def ensure_display():
 def to_numpy(t):
     arr = t.cpu().numpy() if hasattr(t, "cpu") else np.array(t)
     return arr[0] if arr.ndim > 1 else arr
+
+
+def parse_vec(s):
+    return np.array([float(v) for v in s.split()], dtype=np.float64)
+
+
+def normalize(v):
+    v = np.array(v, dtype=np.float64)
+    n = np.linalg.norm(v)
+    if n < 1e-12:
+        return np.zeros_like(v)
+    return v / n
+
+
+def quat_to_rotmat(q):
+    w, x, y, z = q
+    return np.array(
+        [
+            [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+            [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+            [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+        ],
+        dtype=np.float64,
+    )
+
+
+def transform_point(link_pos, link_quat, local_pos):
+    return np.array(link_pos, dtype=np.float64) + quat_to_rotmat(link_quat) @ np.array(
+        local_pos, dtype=np.float64
+    )
+
+
+def load_jaw_box_config(xml_path):
+    tree = ET.parse(xml_path)
+    root = tree.getroot()
+    worldbody = root.find("worldbody")
+    if worldbody is None:
+        raise RuntimeError("worldbody not found in XML")
+    jaw_boxes = {}
+
+    def walk_body(body):
+        body_name = body.attrib.get("name")
+        for geom in body.findall("geom"):
+            geom_name = geom.attrib.get("name")
+            if geom_name in {"fixed_jaw_box", "moving_jaw_box"}:
+                jaw_boxes[geom_name] = {
+                    "body_name": body_name,
+                    "pos": parse_vec(geom.attrib["pos"]),
+                    "size": parse_vec(geom.attrib["size"]),
+                }
+        for child in body.findall("body"):
+            walk_body(child)
+
+    for body in worldbody.findall("body"):
+        walk_body(body)
+    missing = {"fixed_jaw_box", "moving_jaw_box"} - set(jaw_boxes.keys())
+    if missing:
+        raise RuntimeError(f"jaw box geom not found in XML: {sorted(missing)}")
+    return jaw_boxes
 
 
 def render_camera(cam):
@@ -115,6 +175,7 @@ def main():
             print(f"MJCF not found: {e}")
             sys.exit(1)
     print(f"XML: {xml_path}")
+    jaw_box_cfg = load_jaw_box_config(xml_path)
 
     # ── Build scene ──
     import torch
@@ -188,6 +249,20 @@ def main():
     except Exception:
         mj_link = None
 
+    def get_jaw_box_world(link, cfg):
+        link_pos = to_numpy(link.get_pos())
+        link_quat = to_numpy(link.get_quat())
+        center_world = transform_point(link_pos, link_quat, cfg["pos"])
+        rot = quat_to_rotmat(link_quat)
+        thickness_axis_local = np.zeros(3, dtype=np.float64)
+        thickness_axis_local[int(np.argmin(cfg["size"]))] = 1.0
+        thickness_axis_world = normalize(rot @ thickness_axis_local)
+        return {
+            "center_world": center_world,
+            "thickness_axis_world": thickness_axis_world,
+            "half_thickness": float(np.min(cfg["size"])),
+        }
+
     # IK sanity
     ik_target = np.array([args.cube_x, args.cube_y, cube_z])
     q_test = so101.inverse_kinematics(
@@ -205,8 +280,21 @@ def main():
     if mj_link:
         grip_p = to_numpy(gripper_link.get_pos())
         mj_p = to_numpy(mj_link.get_pos())
-        jaw_mid = (grip_p + mj_p) / 2
-        print(f"  jaw_mid=[{jaw_mid[0]:.4f},{jaw_mid[1]:.4f},{jaw_mid[2]:.4f}], jaw_mid_z-cube_z={jaw_mid[2]-cube_z:+.4f}")
+        fixed_box = get_jaw_box_world(gripper_link, jaw_box_cfg["fixed_jaw_box"])
+        moving_box = get_jaw_box_world(mj_link, jaw_box_cfg["moving_jaw_box"])
+        fixed_axis = fixed_box["thickness_axis_world"]
+        moving_axis = moving_box["thickness_axis_world"]
+        fixed_to_moving = moving_box["center_world"] - fixed_box["center_world"]
+        moving_to_fixed = fixed_box["center_world"] - moving_box["center_world"]
+        fixed_inward = fixed_axis * np.sign(np.dot(fixed_to_moving, fixed_axis) or 1.0)
+        moving_inward = moving_axis * np.sign(np.dot(moving_to_fixed, moving_axis) or 1.0)
+        fixed_inner = fixed_box["center_world"] + fixed_inward * fixed_box["half_thickness"]
+        moving_inner = moving_box["center_world"] + moving_inward * moving_box["half_thickness"]
+        jaw_mid = 0.5 * (fixed_inner + moving_inner)
+        print(
+            f"  jaw_mid=[{jaw_mid[0]:.4f},{jaw_mid[1]:.4f},{jaw_mid[2]:.4f}], "
+            f"jaw_mid_z-cube_z={jaw_mid[2]-cube_z:+.4f}"
+        )
 
     so101.set_qpos(home_rad)
     for _ in range(30):

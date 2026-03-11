@@ -14,6 +14,7 @@ import json
 import os
 import subprocess
 import time
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import numpy as np
@@ -39,6 +40,24 @@ def ensure_display() -> None:
 def to_numpy(t):
     arr = t.cpu().numpy() if hasattr(t, "cpu") else np.array(t)
     return arr[0] if arr.ndim > 1 else arr
+
+
+def parse_vec(s):
+    return np.array([float(v) for v in s.split()], dtype=np.float64)
+
+
+def normalize(v):
+    v = np.array(v, dtype=np.float64)
+    n = np.linalg.norm(v)
+    if n < 1e-12:
+        return np.zeros_like(v)
+    return v / n
+
+
+def transform_point(link_pos, link_quat, local_pos):
+    return np.array(link_pos, dtype=np.float64) + quat_to_rotmat(link_quat) @ np.array(
+        local_pos, dtype=np.float64
+    )
 
 
 def render_camera(cam):
@@ -110,6 +129,36 @@ def find_so101_xml(user_xml: str | None) -> Path | None:
         if p.exists():
             return p
     return None
+
+
+def load_jaw_box_config(xml_path):
+    tree = ET.parse(xml_path)
+    root = tree.getroot()
+    worldbody = root.find("worldbody")
+    if worldbody is None:
+        raise RuntimeError("worldbody not found in XML")
+    jaw_boxes = {}
+
+    def walk_body(body):
+        body_name = body.attrib.get("name")
+        for geom in body.findall("geom"):
+            geom_name = geom.attrib.get("name")
+            if geom_name in {"fixed_jaw_box", "moving_jaw_box"}:
+                jaw_boxes[geom_name] = {
+                    "body_name": body_name,
+                    "pos": parse_vec(geom.attrib["pos"]),
+                    "size": parse_vec(geom.attrib["size"]),
+                }
+        for child in body.findall("body"):
+            walk_body(child)
+
+    for body in worldbody.findall("body"):
+        walk_body(body)
+
+    missing = {"fixed_jaw_box", "moving_jaw_box"} - set(jaw_boxes.keys())
+    if missing:
+        raise RuntimeError(f"jaw box geom not found in XML: {sorted(missing)}")
+    return jaw_boxes
 
 
 def quat_to_rotmat(q):
@@ -259,6 +308,7 @@ def main() -> None:
     ee = so101.get_link("grasp_center")
     fixed_jaw = so101.get_link("gripper")
     moving_jaw = so101.get_link("moving_jaw_so101_v1")
+    jaw_box_cfg = load_jaw_box_config(xml)
     cube_init = np.array([args.cube_x, args.cube_y, args.cube_z], dtype=np.float64)
     off = np.array(
         [args.grasp_offset_x, args.grasp_offset_y, args.grasp_offset_z],
@@ -297,13 +347,56 @@ def main() -> None:
             q_deg[5] = grip_deg
         return q_deg
 
+    def get_jaw_box_world(link, cfg):
+        link_pos = to_numpy(link.get_pos())
+        link_quat = to_numpy(link.get_quat())
+        center_world = transform_point(link_pos, link_quat, cfg["pos"])
+        rot = quat_to_rotmat(link_quat)
+        thickness_axis_local = np.zeros(3, dtype=np.float64)
+        thickness_axis_local[int(np.argmin(cfg["size"]))] = 1.0
+        thickness_axis_world = normalize(rot @ thickness_axis_local)
+        return {
+            "center_world": center_world,
+            "thickness_axis_world": thickness_axis_world,
+            "half_thickness": float(np.min(cfg["size"])),
+        }
+
+    def measure_jaw_dz():
+        z_fixed_link = float(to_numpy(fixed_jaw.get_pos())[2])
+        z_moving_link = float(to_numpy(moving_jaw.get_pos())[2])
+        fixed_box = get_jaw_box_world(fixed_jaw, jaw_box_cfg["fixed_jaw_box"])
+        moving_box = get_jaw_box_world(moving_jaw, jaw_box_cfg["moving_jaw_box"])
+        fixed_axis = fixed_box["thickness_axis_world"]
+        moving_axis = moving_box["thickness_axis_world"]
+        fixed_to_moving = moving_box["center_world"] - fixed_box["center_world"]
+        moving_to_fixed = fixed_box["center_world"] - moving_box["center_world"]
+        fixed_inward = fixed_axis * np.sign(np.dot(fixed_to_moving, fixed_axis) or 1.0)
+        moving_inward = moving_axis * np.sign(np.dot(moving_to_fixed, moving_axis) or 1.0)
+        fixed_inner_surface = (
+            fixed_box["center_world"] + fixed_inward * fixed_box["half_thickness"]
+        )
+        moving_inner_surface = (
+            moving_box["center_world"] + moving_inward * moving_box["half_thickness"]
+        )
+        z_fixed_surface = float(fixed_inner_surface[2])
+        z_moving_surface = float(moving_inner_surface[2])
+        return {
+            "dz_link_origin": float(z_moving_link - z_fixed_link),
+            "dz_inner_surface": float(z_moving_surface - z_fixed_surface),
+            "z_fixed_link_origin": z_fixed_link,
+            "z_moving_link_origin": z_moving_link,
+            "z_fixed_inner_surface": z_fixed_surface,
+            "z_moving_inner_surface": z_moving_surface,
+        }
+
     def measure_dz_for_qdeg(q_deg, settle_steps=3):
         q_rad = np.deg2rad(np.array(q_deg, dtype=np.float32))
         so101.set_qpos(q_rad)
         so101.control_dofs_position(q_rad, dof_idx)
         for _ in range(settle_steps):
             scene.step()
-        return float(to_numpy(moving_jaw.get_pos())[2] - to_numpy(fixed_jaw.get_pos())[2])
+        # Primary gating metric: inner-surface delta-z.
+        return float(measure_jaw_dz()["dz_inner_surface"])
 
     # trajectory (same skeleton as 03/12)
     pos_pre = cube_init + off + np.array([0.0, 0.0, 0.10], dtype=np.float64)
@@ -446,22 +539,19 @@ def main() -> None:
                             "best_roll_delta_deg": float(np.degrees(best["roll_delta_rad"])),
                         }
                     )
+                    # No safety fallback: keep descending using the best recovered pose
+                    # even if it does not meet the dz threshold.
+                    wp = best["wp"]
+                    dz_wp = float(best["dz"])
+                    quat_ref = best["quat"]
                     gate_blocked = True
                     gate_block_wp = int(i)
                     gate_block_dz = float(best["dz"])
-                    break
         descent_wps.append(wp)
         prev_rad = np.deg2rad(np.array(wp, dtype=np.float32))
     if not descent_wps:
         raise RuntimeError("No descent waypoint generated; check IK/gate settings")
     descent_wps_generated = int(len(descent_wps))
-    # Keep a full-length approach phase: when gate blocks deeper descend,
-    # repeat the last safe waypoint for remaining descent slots.
-    descent_wps_padded = 0
-    if gate_blocked and len(descent_wps) < n_descent_wps:
-        last_safe_wp = descent_wps[-1].copy()
-        descent_wps_padded = int(n_descent_wps - len(descent_wps))
-        descent_wps += [last_safe_wp.copy() for _ in range(descent_wps_padded)]
     q_approach = descent_wps[-1]
 
     q_close = q_approach.copy()
@@ -521,25 +611,42 @@ def main() -> None:
 
     reset_scene()
     dz_rows = []
-    dz0 = float(to_numpy(moving_jaw.get_pos())[2] - to_numpy(fixed_jaw.get_pos())[2])
-    dz_rows.append({"frame_idx": -1, "phase": "initial_after_reset", "dz_jaw": dz0})
+    dz0 = measure_jaw_dz()
+    dz_rows.append(
+        {
+            "frame_idx": -1,
+            "phase": "initial_after_reset",
+            "dz_jaw": float(dz0["dz_inner_surface"]),
+            "dz_inner_surface": float(dz0["dz_inner_surface"]),
+            "dz_link_origin": float(dz0["dz_link_origin"]),
+        }
+    )
     frame_buffer = []
     keep_approach = [i for i, p in enumerate(phases) if p == "approach"]
-    keep_approach = set(keep_approach[-EXPORT_APPROACH_TAIL :])
+    keep_approach_tail = set(keep_approach[-EXPORT_APPROACH_TAIL :])
     if args.quat_mode == "pregrasp_flatten_yaw":
-        # For flattened-yaw runs, keep the full leveling stage for diagnosis.
+        # For gate-leveling runs, keep full pre_grasp_level + full approach.
         keep_level = {i for i, p in enumerate(phases) if p == "pre_grasp_level"}
-        keep = keep_approach | keep_level
+        keep_approach_full = set(keep_approach)
+        keep = keep_level | keep_approach_full
     else:
         # Baseline run: only keep the final approach tail.
-        keep = keep_approach
+        keep = keep_approach_tail
     for i, q_deg in enumerate(traj):
         so101.control_dofs_position(
             np.deg2rad(np.array(q_deg, dtype=np.float32)), dof_idx
         )
         scene.step()
-        dz = float(to_numpy(moving_jaw.get_pos())[2] - to_numpy(fixed_jaw.get_pos())[2])
-        dz_rows.append({"frame_idx": int(i), "phase": phases[i], "dz_jaw": dz})
+        dz = measure_jaw_dz()
+        dz_rows.append(
+            {
+                "frame_idx": int(i),
+                "phase": phases[i],
+                "dz_jaw": float(dz["dz_inner_surface"]),
+                "dz_inner_surface": float(dz["dz_inner_surface"]),
+                "dz_link_origin": float(dz["dz_link_origin"]),
+            }
+        )
         if i in keep:
             frame_buffer.append(
                 (
@@ -590,6 +697,7 @@ def main() -> None:
         "quat_mode": args.quat_mode,
         "quat_ref_source": quat_ref_source,
         "quat_ref": quat_ref,
+        "jaw_reference_for_gating": "inner_surface_from_fixed_and_moving_jaw_box",
         "quat_start_wp": int(QUAT_START_WP),
         "level_tolerance": float(LEVEL_TOLERANCE),
         "level_hold_steps": int(LEVEL_HOLD_STEPS),
@@ -608,7 +716,7 @@ def main() -> None:
         "descent_wps_planned": int(n_descent_wps),
         "descent_wps_used": int(descent_wps_generated),
         "descent_wps_executed": int(len(descent_wps)),
-        "descent_wps_padded": int(descent_wps_padded),
+        "descent_wps_padded": 0,
         "gripper_open": float(args.gripper_open),
         "gripper_close": float(args.gripper_close),
         "cube_shift_norm": float(np.linalg.norm(cube_shift)),
@@ -618,6 +726,9 @@ def main() -> None:
         "export_frames": {
             "approach_tail": int(EXPORT_APPROACH_TAIL),
             "pre_grasp_level_all_when_flatten_yaw": bool(
+                args.quat_mode == "pregrasp_flatten_yaw"
+            ),
+            "approach_all_when_flatten_yaw": bool(
                 args.quat_mode == "pregrasp_flatten_yaw"
             ),
         },

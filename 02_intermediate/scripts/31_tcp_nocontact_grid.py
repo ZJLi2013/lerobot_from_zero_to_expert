@@ -12,6 +12,7 @@ import json
 import os
 import subprocess
 import time
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import numpy as np
@@ -46,6 +47,36 @@ def parse_csv_floats(text):
     return [float(x.strip()) for x in text.split(",") if x.strip()]
 
 
+def parse_vec(s):
+    return np.array([float(v) for v in s.split()], dtype=np.float64)
+
+
+def normalize(v):
+    v = np.array(v, dtype=np.float64)
+    n = np.linalg.norm(v)
+    if n < 1e-12:
+        return np.zeros_like(v)
+    return v / n
+
+
+def quat_to_rotmat(q):
+    w, x, y, z = q
+    return np.array(
+        [
+            [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+            [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+            [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+        ],
+        dtype=np.float64,
+    )
+
+
+def transform_point(link_pos, link_quat, local_pos):
+    return np.array(link_pos, dtype=np.float64) + quat_to_rotmat(link_quat) @ np.array(
+        local_pos, dtype=np.float64
+    )
+
+
 def find_so101_xml(user_path=None):
     if user_path:
         p = Path(user_path)
@@ -62,6 +93,36 @@ def find_so101_xml(user_path=None):
         if p.exists():
             return p
     return None
+
+
+def load_jaw_box_config(xml_path):
+    tree = ET.parse(xml_path)
+    root = tree.getroot()
+    worldbody = root.find("worldbody")
+    if worldbody is None:
+        raise RuntimeError("worldbody not found in XML")
+    jaw_boxes = {}
+
+    def walk_body(body):
+        body_name = body.attrib.get("name")
+        for geom in body.findall("geom"):
+            geom_name = geom.attrib.get("name")
+            if geom_name in {"fixed_jaw_box", "moving_jaw_box"}:
+                jaw_boxes[geom_name] = {
+                    "body_name": body_name,
+                    "pos": parse_vec(geom.attrib["pos"]),
+                    "size": parse_vec(geom.attrib["size"]),
+                }
+        for child in body.findall("body"):
+            walk_body(child)
+
+    for body in worldbody.findall("body"):
+        walk_body(body)
+
+    missing = {"fixed_jaw_box", "moving_jaw_box"} - set(jaw_boxes.keys())
+    if missing:
+        raise RuntimeError(f"jaw box geom not found in XML: {sorted(missing)}")
+    return jaw_boxes
 
 
 def stage(name):
@@ -101,6 +162,7 @@ def main():
     if xml_path is None:
         raise RuntimeError("SO-101 xml not found. Pass --xml.")
     print(f"xml: {xml_path}")
+    jaw_box_cfg = load_jaw_box_config(xml_path)
 
     import genesis as gs
     import genesis.utils.geom as gu
@@ -174,6 +236,20 @@ def main():
     elif ee_name == "grasp_center":
         print("using grasp_center as fixed tcp")
 
+    def get_jaw_box_world(link, cfg):
+        link_pos = to_numpy(link.get_pos())
+        link_quat = to_numpy(link.get_quat())
+        center_world = transform_point(link_pos, link_quat, cfg["pos"])
+        rot = quat_to_rotmat(link_quat)
+        thickness_axis_local = np.zeros(3, dtype=np.float64)
+        thickness_axis_local[int(np.argmin(cfg["size"]))] = 1.0
+        thickness_axis_world = normalize(rot @ thickness_axis_local)
+        return {
+            "center_world": center_world,
+            "thickness_axis_world": thickness_axis_world,
+            "half_thickness": float(np.min(cfg["size"])),
+        }
+
     def reset_home():
         so101.set_qpos(home_rad)
         so101.control_dofs_position(home_rad, dof_idx)
@@ -227,11 +303,27 @@ def main():
             tcp_pos = ee_pos
         delta = tcp_pos - target_xyz
         delta_jaw = None
+        delta_jaw_link_origin = None
+        delta_jaw_inner_surface = None
         if fixed_jaw_link is not None and moving_jaw_link is not None:
             z_fixed = float(to_numpy(fixed_jaw_link.get_pos())[2])
             z_moving = float(to_numpy(moving_jaw_link.get_pos())[2])
-            delta_jaw = float(z_moving - z_fixed)
-        return tcp_pos, delta, delta_jaw
+            delta_jaw_link_origin = float(z_moving - z_fixed)
+
+            fixed_box = get_jaw_box_world(fixed_jaw_link, jaw_box_cfg["fixed_jaw_box"])
+            moving_box = get_jaw_box_world(moving_jaw_link, jaw_box_cfg["moving_jaw_box"])
+            fixed_axis = fixed_box["thickness_axis_world"]
+            moving_axis = moving_box["thickness_axis_world"]
+            fixed_to_moving = moving_box["center_world"] - fixed_box["center_world"]
+            moving_to_fixed = fixed_box["center_world"] - moving_box["center_world"]
+            fixed_inward = fixed_axis * np.sign(np.dot(fixed_to_moving, fixed_axis) or 1.0)
+            moving_inward = moving_axis * np.sign(np.dot(moving_to_fixed, moving_axis) or 1.0)
+            fixed_inner = fixed_box["center_world"] + fixed_inward * fixed_box["half_thickness"]
+            moving_inner = moving_box["center_world"] + moving_inward * moving_box["half_thickness"]
+            delta_jaw_inner_surface = float(moving_inner[2] - fixed_inner[2])
+            # Backward-compatible alias now points to primary inner-surface metric.
+            delta_jaw = float(delta_jaw_inner_surface)
+        return tcp_pos, delta, delta_jaw, delta_jaw_link_origin, delta_jaw_inner_surface
 
     stage("2/4 Run no-contact grid")
     print(f"points={len(points)} repeats={args.repeats} target_z={args.target_z:.4f}")
@@ -241,13 +333,15 @@ def main():
         samples = []
         for _ in range(args.repeats):
             reset_home()
-            tcp_pos, delta, delta_jaw = solve_and_measure(target)
+            tcp_pos, delta, delta_jaw, delta_jaw_link_origin, delta_jaw_inner_surface = solve_and_measure(target)
             samples.append(
                 {
                     "ik_target": [float(v) for v in target.tolist()],
                     "tcp_actual": [float(v) for v in tcp_pos.tolist()],
                     "tcp_offset": [float(v) for v in delta.tolist()],
                     "delta_jaw": delta_jaw,
+                    "delta_jaw_link_origin": delta_jaw_link_origin,
+                    "delta_jaw_inner_surface": delta_jaw_inner_surface,
                 }
             )
         deltas = np.array([s["tcp_offset"] for s in samples], dtype=np.float64)
@@ -255,6 +349,14 @@ def main():
         std_delta = deltas.std(axis=0)
         jaw_vals = np.array(
             [s["delta_jaw"] for s in samples if s["delta_jaw"] is not None], dtype=np.float64
+        )
+        jaw_vals_link = np.array(
+            [s["delta_jaw_link_origin"] for s in samples if s["delta_jaw_link_origin"] is not None],
+            dtype=np.float64,
+        )
+        jaw_vals_surface = np.array(
+            [s["delta_jaw_inner_surface"] for s in samples if s["delta_jaw_inner_surface"] is not None],
+            dtype=np.float64,
         )
         row = {
             "target_x": float(x),
@@ -265,6 +367,10 @@ def main():
             "tcp_offset_std": [float(v) for v in std_delta.tolist()],
             "delta_jaw_mean": float(jaw_vals.mean()) if jaw_vals.size > 0 else None,
             "delta_jaw_std": float(jaw_vals.std()) if jaw_vals.size > 0 else None,
+            "delta_jaw_link_origin_mean": float(jaw_vals_link.mean()) if jaw_vals_link.size > 0 else None,
+            "delta_jaw_link_origin_std": float(jaw_vals_link.std()) if jaw_vals_link.size > 0 else None,
+            "delta_jaw_inner_surface_mean": float(jaw_vals_surface.mean()) if jaw_vals_surface.size > 0 else None,
+            "delta_jaw_inner_surface_std": float(jaw_vals_surface.std()) if jaw_vals_surface.size > 0 else None,
             "samples": samples,
         }
         rows.append(row)
@@ -283,6 +389,14 @@ def main():
         [r["delta_jaw_mean"] for r in rows if r.get("delta_jaw_mean") is not None],
         dtype=np.float64,
     )
+    jaw_all_link = np.array(
+        [r["delta_jaw_link_origin_mean"] for r in rows if r.get("delta_jaw_link_origin_mean") is not None],
+        dtype=np.float64,
+    )
+    jaw_all_surface = np.array(
+        [r["delta_jaw_inner_surface_mean"] for r in rows if r.get("delta_jaw_inner_surface_mean") is not None],
+        dtype=np.float64,
+    )
     summary = {
         "exp_id": args.exp_id,
         "xml_path": str(xml_path),
@@ -292,6 +406,7 @@ def main():
             "moving": "moving_jaw_so101_v1" if moving_jaw_link is not None else None,
         },
         "ik_supports_local_point": bool(ik_supports_local_point),
+        "jaw_reference_primary": "inner_surface_from_fixed_and_moving_jaw_box",
         "target_z": float(args.target_z),
         "grid_x": xs,
         "grid_y": ys,
@@ -301,6 +416,10 @@ def main():
         "tcp_offset_global_std_over_points": [float(v) for v in mean_all.std(axis=0).tolist()],
         "delta_jaw_global_mean": float(jaw_all.mean()) if jaw_all.size > 0 else None,
         "delta_jaw_global_std_over_points": float(jaw_all.std()) if jaw_all.size > 0 else None,
+        "delta_jaw_link_origin_global_mean": float(jaw_all_link.mean()) if jaw_all_link.size > 0 else None,
+        "delta_jaw_link_origin_global_std_over_points": float(jaw_all_link.std()) if jaw_all_link.size > 0 else None,
+        "delta_jaw_inner_surface_global_mean": float(jaw_all_surface.mean()) if jaw_all_surface.size > 0 else None,
+        "delta_jaw_inner_surface_global_std_over_points": float(jaw_all_surface.std()) if jaw_all_surface.size > 0 else None,
         "point_results": rows,
     }
     with open(out_dir / "summary.json", "w", encoding="utf-8") as f:
