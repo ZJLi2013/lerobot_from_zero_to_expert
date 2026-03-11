@@ -475,7 +475,9 @@ def main() -> None:
         for _ in range(5):
             scene.step()
     n_descent_wps = 6
+    N_REPLAN_WPS = 4
     descent_wps = []
+    descent_wp_phases = []
     replan_wps = []
     pre_close_target = cube_init + off + np.array([0.0, 0.0, args.approach_z], dtype=np.float64)
     recovery_success_count = 0
@@ -579,21 +581,32 @@ def main() -> None:
                             "roll_delta_deg": float(np.degrees(best_feasible["roll_delta_rad"])),
                         }
                     )
-                    # Leveling succeeded — replan from this leveled pose to pre-close target.
+                    # Leveling succeeded — multi-step replan from leveled pose to pre-close target.
+                    descent_wps.append(wp)
+                    descent_wp_phases.append("tune_roll")
                     replan_seed = np.deg2rad(np.array(wp, dtype=np.float32))
-                    wp_replan = solve_ik_seeded(
-                        pre_close_target,
-                        args.gripper_open,
-                        replan_seed,
-                        quat_target=quat_ref,
-                    )
+                    gc_leveled = get_gc_pos_for_qdeg(wp, settle_steps=2)
+                    replan_prev_rad = replan_seed.copy()
+                    for ri in range(N_REPLAN_WPS):
+                        alpha = (ri + 1) / N_REPLAN_WPS
+                        rp_pos = gc_leveled + alpha * (pre_close_target - gc_leveled)
+                        rp_wp = solve_ik_seeded(
+                            rp_pos,
+                            args.gripper_open,
+                            replan_prev_rad,
+                            quat_target=quat_ref,
+                        )
+                        replan_wps.append(rp_wp)
+                        replan_prev_rad = np.deg2rad(np.array(rp_wp, dtype=np.float32))
                     replan_eval = evaluate_qdeg_against_target(
-                        wp_replan, pre_close_target, settle_steps=3
+                        replan_wps[-1], pre_close_target, settle_steps=3
                     )
                     pure_replan_events.append(
                         {
                             "trigger_wp_idx": int(i),
                             "leveled_dz": float(dz_wp),
+                            "n_replan_wps": int(N_REPLAN_WPS),
+                            "gc_leveled": [float(v) for v in gc_leveled.tolist()],
                             "target_pos": [float(v) for v in pre_close_target.tolist()],
                             "dz_abs": float(abs(replan_eval["dz_inner_surface"])),
                             "gc_pos_error": float(replan_eval["gc_pos_error"]),
@@ -601,10 +614,8 @@ def main() -> None:
                             "mid_surface_xy_drift": float(replan_eval["mid_surface_xy_drift"]),
                         }
                     )
-                    descent_wps.append(wp)
-                    replan_wps.append(wp_replan)
-                    prev_wp_deg = np.array(wp_replan, dtype=np.float64)
-                    prev_rad = np.deg2rad(np.array(wp_replan, dtype=np.float32))
+                    prev_wp_deg = np.array(replan_wps[-1], dtype=np.float64)
+                    prev_rad = replan_prev_rad
                     break
                 else:
                     recovery_fail_count += 1
@@ -621,6 +632,7 @@ def main() -> None:
                     dz_wp = float(best["dz"])
                     quat_ref = best["quat"]
         descent_wps.append(wp)
+        descent_wp_phases.append("approach")
         prev_wp_deg = np.array(wp, dtype=np.float64)
         prev_rad = np.deg2rad(np.array(wp, dtype=np.float32))
     if not descent_wps:
@@ -694,10 +706,11 @@ def main() -> None:
         phases += ["pre_grasp_level"] * LEVEL_HOLD_STEPS
     steps_per_desc = max(3, args.trial_steps // (8 * n_descent_wps))
     prev = q_pre
-    for wp in descent_wps:
+    for wi, wp in enumerate(descent_wps):
         seg = lerp(prev, wp, steps_per_desc)
         traj += seg
-        phases += ["approach"] * len(seg)
+        ph = descent_wp_phases[wi] if wi < len(descent_wp_phases) else "approach"
+        phases += [ph] * len(seg)
         prev = wp
     if replan_wps:
         steps_per_replan = max(4, args.trial_steps // 10)
@@ -738,7 +751,7 @@ def main() -> None:
         }
     )
     frame_buffer = []
-    keep_approach = [i for i, p in enumerate(phases) if p in {"approach", "approach_replan"}]
+    keep_approach = [i for i, p in enumerate(phases) if p in {"approach", "tune_roll", "approach_replan"}]
     keep_approach_tail = set(keep_approach[-EXPORT_APPROACH_TAIL :])
     if args.quat_mode == "pregrasp_flatten_yaw":
         # For gate-leveling runs, keep full pre_grasp_level + approach + close/hold/lift.
@@ -786,7 +799,7 @@ def main() -> None:
     cube_pos_final = to_numpy(cube.get_pos())
     cube_shift = cube_pos_final - cube_init
     phase_dz = phase_stats(dz_rows)
-    approach_rows = [r for r in dz_rows if r["phase"] in {"approach", "approach_replan"}]
+    approach_rows = [r for r in dz_rows if r["phase"] in {"approach", "tune_roll", "approach_replan"}]
     move_rows = [r for r in dz_rows if r["phase"] == "move_pre"]
     dz_analysis = {}
     if move_rows and approach_rows:
