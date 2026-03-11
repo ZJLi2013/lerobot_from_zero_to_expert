@@ -208,10 +208,6 @@ LEVEL_RECOVERY_ROLL_STEP_RAD = np.deg2rad(2.0)
 LEVEL_RECOVERY_MAX_ROLL_STEPS = 8
 LEVEL_RECOVERY_FINE_ROLL_STEP_RAD = np.deg2rad(1.0)
 LEVEL_RECOVERY_FINE_ROLL_STEPS = 2
-LOCAL_REPLAN_XY_TOL = 0.012
-DESCENT_MAX_RISE = 0.0015
-LOCAL_REPLAN_DZ_REGRESS_TOL = 0.001
-LOCAL_REPLAN_HORIZON_CANDIDATES = (4, 3, 2)
 PRE_CLOSE_POS_TOL = 0.012
 PRE_CLOSE_MID_XY_TOL = 0.018
 PRE_CLOSE_MAX_ABOVE_TOP = 0.012
@@ -480,17 +476,13 @@ def main() -> None:
             scene.step()
     n_descent_wps = 6
     descent_wps = []
+    replan_wps = []
+    pre_close_target = cube_init + off + np.array([0.0, 0.0, args.approach_z], dtype=np.float64)
     recovery_success_count = 0
     recovery_fail_count = 0
     recovery_events = []
-    local_replan_accept_count = 0
-    local_replan_fallback_count = 0
-    local_replan_events = []
-    q_pre_eval = evaluate_qdeg_against_target(q_pre, pos_pre, settle_steps=3)
-    prev_mid_surface_z = float(q_pre_eval["mid_surface_z"])
-    prev_dz_abs = float(abs(q_pre_eval["dz_inner_surface"]))
+    pure_replan_events = []
     prev_wp_deg = np.array(q_pre, dtype=np.float64)
-    quat_prev = quat_ref
     for i in range(n_descent_wps):
         frac = (i + 1) / n_descent_wps
         z = 0.10 + (args.approach_z - 0.10) * frac
@@ -603,103 +595,36 @@ def main() -> None:
                     wp = best["wp"]
                     dz_wp = float(best["dz"])
                     quat_ref = best["quat"]
-            # Local short-horizon replanning from current pose; do not pull back to old path.
-            local_quat = quat_ref if use_ref_quat else None
-            local_accept = None
-            local_best = None
-            gc_prev = get_gc_pos_for_qdeg(prev_wp_deg, settle_steps=2)
-            for h in LOCAL_REPLAN_HORIZON_CANDIDATES:
-                alpha = min(1.0, 2.0 / float(h))
-                local_pos = gc_prev + alpha * (pos - gc_prev)
-                wp_local = solve_ik_seeded(
-                    local_pos,
-                    args.gripper_open,
-                    prev_rad,
-                    quat_target=local_quat,
-                )
-                local_eval = evaluate_qdeg_against_target(wp_local, local_pos, settle_steps=3)
-                dz_regress_reject = (
-                    abs(float(local_eval["dz_inner_surface"]))
-                    > (prev_dz_abs + LOCAL_REPLAN_DZ_REGRESS_TOL)
-                )
-                rise_reject = local_eval["mid_surface_z"] > (prev_mid_surface_z + DESCENT_MAX_RISE)
-                xy_reject = local_eval["gc_xy_drift"] > LOCAL_REPLAN_XY_TOL
-                score = (
-                    abs(float(local_eval["dz_inner_surface"]))
-                    + 0.5 * float(local_eval["gc_xy_drift"])
-                    + 0.5 * float(local_eval["mid_surface_xy_drift"])
-                )
-                if local_best is None or score < local_best["score"]:
-                    local_best = {
-                        "horizon": int(h),
-                        "wp": wp_local,
-                        "eval": local_eval,
-                        "score": float(score),
-                        "alpha": float(alpha),
-                        "dz_regress_reject": bool(dz_regress_reject),
-                        "rise_reject": bool(rise_reject),
-                        "xy_reject": bool(xy_reject),
-                    }
-                if not (dz_regress_reject or rise_reject or xy_reject):
-                    local_accept = {
-                        "horizon": int(h),
-                        "wp": wp_local,
-                        "eval": local_eval,
-                        "alpha": float(alpha),
-                    }
-                    break
-
-            if local_accept is not None:
-                wp = local_accept["wp"]
-                local_eval = local_accept["eval"]
-                local_replan_accept_count += 1
-                local_replan_events.append(
-                    {
-                        "wp_idx": int(i),
-                        "accepted": True,
-                        "horizon": int(local_accept["horizon"]),
-                        "alpha": float(local_accept["alpha"]),
-                        "dz_abs": float(abs(local_eval["dz_inner_surface"])),
-                        "gc_xy_drift": float(local_eval["gc_xy_drift"]),
-                        "mid_surface_xy_drift": float(local_eval["mid_surface_xy_drift"]),
-                    }
-                )
-                prev_mid_surface_z = float(local_eval["mid_surface_z"])
-                prev_dz_abs = float(abs(local_eval["dz_inner_surface"]))
-                prev_wp_deg = np.array(wp, dtype=np.float64)
-                quat_prev = quat_ref
-            else:
-                # Fallback to best local candidate instead of old-path reanchor.
-                wp = local_best["wp"]
-                local_eval = local_best["eval"]
-                local_replan_fallback_count += 1
-                local_replan_events.append(
-                    {
-                        "wp_idx": int(i),
-                        "accepted": False,
-                        "horizon": int(local_best["horizon"]),
-                        "alpha": float(local_best["alpha"]),
-                        "dz_regress_reject": bool(local_best["dz_regress_reject"]),
-                        "rise_reject": bool(local_best["rise_reject"]),
-                        "xy_reject": bool(local_best["xy_reject"]),
-                        "dz_abs": float(abs(local_eval["dz_inner_surface"])),
-                        "gc_xy_drift": float(local_eval["gc_xy_drift"]),
-                        "mid_surface_xy_drift": float(local_eval["mid_surface_xy_drift"]),
-                    }
-                )
-                if local_eval["mid_surface_z"] > (prev_mid_surface_z + DESCENT_MAX_RISE):
-                    wp = prev_wp_deg.copy()
-                    quat_ref = quat_prev
-                else:
-                    prev_mid_surface_z = float(local_eval["mid_surface_z"])
-                    prev_dz_abs = float(abs(local_eval["dz_inner_surface"]))
-                    prev_wp_deg = np.array(wp, dtype=np.float64)
+            # Pure replanning: directly IK to pre-close target.
+            wp_replan = solve_ik_seeded(
+                pre_close_target,
+                args.gripper_open,
+                prev_rad,
+                quat_target=quat_ref if use_ref_quat else None,
+            )
+            replan_eval = evaluate_qdeg_against_target(
+                wp_replan, pre_close_target, settle_steps=3
+            )
+            pure_replan_events.append(
+                {
+                    "trigger_wp_idx": int(i),
+                    "target_pos": [float(v) for v in pre_close_target.tolist()],
+                    "dz_abs": float(abs(replan_eval["dz_inner_surface"])),
+                    "gc_pos_error": float(replan_eval["gc_pos_error"]),
+                    "gc_xy_drift": float(replan_eval["gc_xy_drift"]),
+                    "mid_surface_xy_drift": float(replan_eval["mid_surface_xy_drift"]),
+                }
+            )
+            replan_wps.append(wp_replan)
+            prev_wp_deg = np.array(wp_replan, dtype=np.float64)
+            prev_rad = np.deg2rad(np.array(wp_replan, dtype=np.float32))
+            break
         descent_wps.append(wp)
+        prev_wp_deg = np.array(wp, dtype=np.float64)
         prev_rad = np.deg2rad(np.array(wp, dtype=np.float32))
     if not descent_wps:
         raise RuntimeError("No descent waypoint generated; check IK/gate settings")
-    q_approach = descent_wps[-1]
-    pre_close_target = cube_init + off + np.array([0.0, 0.0, args.approach_z], dtype=np.float64)
+    q_approach = replan_wps[-1] if replan_wps else descent_wps[-1]
     pre_close_replan = {
         "enabled": bool(args.quat_mode == "pregrasp_flatten_yaw"),
         "jaw_parallel_ok": None,
@@ -714,13 +639,9 @@ def main() -> None:
         "mid_surface_to_cube_top": None,
     }
     if args.quat_mode == "pregrasp_flatten_yaw" and quat_ref is not None:
-        q_approach = solve_ik_seeded(
-            pre_close_target,
-            args.gripper_open,
-            prev_rad,
-            quat_target=quat_ref,
+        pre_close_eval = evaluate_qdeg_against_target(
+            q_approach, pre_close_target, settle_steps=5
         )
-        pre_close_eval = evaluate_qdeg_against_target(q_approach, pre_close_target, settle_steps=5)
         pre_close_replan.update(
             {
                 "gc_pos_error": float(pre_close_eval["gc_pos_error"]),
@@ -742,12 +663,7 @@ def main() -> None:
         prev_rad = np.deg2rad(np.array(q_approach, dtype=np.float32))
 
     q_close = q_approach.copy()
-    close_skipped = bool(
-        args.quat_mode == "pregrasp_flatten_yaw"
-        and pre_close_replan["enabled"]
-        and not pre_close_replan["pre_close_gate_pass"]
-    )
-    if so101.n_dofs >= 6 and not close_skipped:
+    if so101.n_dofs >= 6:
         q_close[5] = args.gripper_close
 
     n_lift_wps = 4
@@ -782,6 +698,13 @@ def main() -> None:
         traj += seg
         phases += ["approach"] * len(seg)
         prev = wp
+    if replan_wps:
+        steps_per_replan = max(4, args.trial_steps // 10)
+        for wp in replan_wps:
+            seg = lerp(prev, wp, steps_per_replan)
+            traj += seg
+            phases += ["approach_replan"] * len(seg)
+            prev = wp
     traj += [q_approach.copy() for _ in range(args.approach_hold_steps)]
     phases += ["approach_hold"] * args.approach_hold_steps
     n_close = max(8, args.trial_steps // 12)
@@ -814,7 +737,7 @@ def main() -> None:
         }
     )
     frame_buffer = []
-    keep_approach = [i for i, p in enumerate(phases) if p == "approach"]
+    keep_approach = [i for i, p in enumerate(phases) if p in {"approach", "approach_replan"}]
     keep_approach_tail = set(keep_approach[-EXPORT_APPROACH_TAIL :])
     if args.quat_mode == "pregrasp_flatten_yaw":
         # For gate-leveling runs, keep full pre_grasp_level + approach + close/hold/lift.
@@ -862,7 +785,7 @@ def main() -> None:
     cube_pos_final = to_numpy(cube.get_pos())
     cube_shift = cube_pos_final - cube_init
     phase_dz = phase_stats(dz_rows)
-    approach_rows = [r for r in dz_rows if r["phase"] == "approach"]
+    approach_rows = [r for r in dz_rows if r["phase"] in {"approach", "approach_replan"}]
     move_rows = [r for r in dz_rows if r["phase"] == "move_pre"]
     dz_analysis = {}
     if move_rows and approach_rows:
@@ -884,21 +807,6 @@ def main() -> None:
             # simple heuristic: |delta_approach| > 1 mm and trend sign matches
             "approach_accumulates": bool(abs(app_end - app_start) > 1e-3 and np.sign(app_end - app_start) == np.sign(slope)),
         }
-    local_replan_reason_counts = {
-        "dz_regress_reject": 0,
-        "rise_reject": 0,
-        "xy_reject": 0,
-    }
-    for ev in local_replan_events:
-        if ev.get("accepted", True):
-            continue
-        if ev.get("dz_regress_reject", False):
-            local_replan_reason_counts["dz_regress_reject"] += 1
-        if ev.get("rise_reject", False):
-            local_replan_reason_counts["rise_reject"] += 1
-        if ev.get("xy_reject", False):
-            local_replan_reason_counts["xy_reject"] += 1
-
     level_recovery_summary = {
         "roll_step_deg": float(np.degrees(LEVEL_RECOVERY_ROLL_STEP_RAD)),
         "max_roll_steps": int(LEVEL_RECOVERY_MAX_ROLL_STEPS),
@@ -912,19 +820,14 @@ def main() -> None:
     if args.summary_verbose_events:
         level_recovery_summary["events"] = recovery_events
 
-    local_replan_summary = {
-        "xy_tol": float(LOCAL_REPLAN_XY_TOL),
-        "descent_max_rise": float(DESCENT_MAX_RISE),
-        "dz_regress_tol": float(LOCAL_REPLAN_DZ_REGRESS_TOL),
-        "horizon_candidates": [int(v) for v in LOCAL_REPLAN_HORIZON_CANDIDATES],
-        "accept_count": int(local_replan_accept_count),
-        "fallback_count": int(local_replan_fallback_count),
-        "fallback_reason_counts": local_replan_reason_counts,
-        "events_count": int(len(local_replan_events)),
-        "events_head": local_replan_events[:12],
+    pure_replan_summary = {
+        "target_pos": [float(v) for v in pre_close_target.tolist()],
+        "waypoints_count": int(len(replan_wps)),
+        "events_count": int(len(pure_replan_events)),
+        "events_head": pure_replan_events[:12],
     }
     if args.summary_verbose_events:
-        local_replan_summary["events"] = local_replan_events
+        pure_replan_summary["events"] = pure_replan_events
 
     summary = {
         "exp_id": args.exp_id,
@@ -942,9 +845,8 @@ def main() -> None:
         "level_hold_steps": int(LEVEL_HOLD_STEPS),
         "gate_blocked": bool(recovery_fail_count > 0),
         "level_recovery": level_recovery_summary,
-        "local_replan": local_replan_summary,
+        "pure_replan": pure_replan_summary,
         "pre_close_replan": pre_close_replan,
-        "close_skipped_by_pre_close_gate": bool(close_skipped),
         "descent_wps_planned": int(n_descent_wps),
         "descent_wps_executed": int(len(descent_wps)),
         "gripper_open": float(args.gripper_open),
