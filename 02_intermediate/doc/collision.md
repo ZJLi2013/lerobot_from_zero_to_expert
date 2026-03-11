@@ -691,17 +691,7 @@ offset_z:   -0.010 (先固定)
 
 目标：将 `delta_z = z_moving - z_fixed` 收敛到阈值内（当前阈值 `|delta_z| <= 0.004m`），再进入稳定抓取。
 
-当前在 `33_grasp_light.py` 上验证了两种“单变量调平”策略：
-
-1. **策略A：仅调航向角（yaw-only）**
-   - 做法：在 gate 触发后，只扫描 `yaw`（先粗扫，再细扫），其他量不变。
-   - 结果（Exp3 参数）：`dz_before=-0.03447m -> best_dz=-0.02574m`，改善约 `8.7mm`。
-   - 判定：仍远大于 `0.004m`，未通过 gate（`success_count=0`）。
-
-2. **策略B：仅调 roll 角（roll-only）**
-   - 做法：仅扫描 `roll`（`±2°` 粗扫到 `±16°`，命中后 `1°` 细扫）。
-   - 结果（Exp3 参数）：`dz_before=-0.03447m -> best_dz=-0.02574m`，改善量与 yaw-only 接近。
-   - 判定：同样未收敛到阈值内（`success_count=0`）
+当前在 `33_grasp_light.py` 上的"调平”策略: 仅调 roll 角（roll-only）
 
 
 图示（概念）：
@@ -723,44 +713,74 @@ roll 角: 围绕末端前进轴旋转（“左右倾斜”）
           爪子连线一侧上/下倾，直接影响两爪高度差 delta_z
 ```
 
-
-
-3. 结论（补充 no-cube 参考系验证）：
-
-| strategy | best_dz  |
-| -------- | -------- |
-| yaw      | -0.02574 |
-| roll     | -0.02574 |
-
-`yaw-only` 与 `roll-only` 收敛到几乎同一 `best_dz`，说明单自由度姿态调平能力受限，疑似存在参考系偏置。
-
-在 no-cube 场景（`34_nocube_reference_check.py`）下进一步验证：
-
-- `error = z_grasp_center - (z_fixed + z_moving)/2`
-- `approach` 阶段均值：
-  - `quat_mode=none`：约 `-0.0636 m`
-  - `quat_mode=pregrasp_flatten_yaw`：约 `-0.0622 m`
-
-这表明即使无接触，`grasp_center` 与 jaw midpoint 仍存在厘米级系统偏差；当前问题更像 **reference/frame 定义问题优先**，而非仅靠 yaw/roll 控制可解。
-
-
-4. `34_nocube_reference_check`结论整理
+3. `34_nocube_reference_check`结论整理
 
 - 推荐口径（inner surface）：
   - 采用`link origin`参考，“约 6cm 偏差”，但不代表真实夹持接触中心。
   - 采用 `fixed_jaw_box/moving_jaw_box` 内侧接触面中点后，`grasp_center` 与 jaw midpoint 在 `approach` 基本重合。
-- 结论：
-  - 后续标定与诊断统一使用 `inner-surface midpoint`；
-  - `link origin` 指标仅作历史对照，不再作为主判据。
+
+
+4. 基本结论
+
+**当前调平策略有效**
+
+before:
+
+![image](./images/flatten_roll/f029_approach_before.png)
+
+after:
+
+![image](./images/flatten_roll/f037_approach_after.png)
+
+
+### 11. delta_z 调平后重新规划
+
+实验设计：以“当前 pose + 当前已恢复姿态”为起点，做**纯重新规划**。
+
+设计目标：
+
+- 不再把调平后的解强拉回旧路径；
+- 直接验证“调平姿态 + 新轨迹”是否能自然到达可抓位置；
+- 让实验结论只反映重规划本身，不被额外 gate 逻辑干扰。
+
+IK 参考点修正：
+
+> **问题**：`solve_ik_seeded(pos, link=ee)` 中 `ee = grasp_center` link，IK 默认将该 link 的 **link origin** 送到 `pos`。
+> 但实际抓取参考点应是 **jaws inner surface midpoint**（见 §10 定义），两者之间存在配置相关的偏移。
+> 直接把 midpoint 坐标传入 IK 的 `pos` 参数会让 link origin（而非 midpoint）到达该位置，导致系统性偏差。
+>
+> **发现**：Genesis `inverse_kinematics()` 原生支持 `local_point` 参数（见 `rigid_entity.py:1463-1466`）：
+>
+> ```python
+> local_point : None | array_like, shape (3,), optional
+>     A point in the link's local frame to be positioned at `pos`.
+>     If None, the link origin is used.
+>     This is useful for positioning a tool center point (TCP) or
+>     fingertip that is offset from the link origin.
+> ```
+>
+> **方案**：计算 jaws inner surface midpoint 在 `grasp_center` link 局部坐标系下的偏移向量，
+> 传入 `local_point`，IK 内部迭代时会持续考虑该偏移，直接将 midpoint 送到 `pos`。
+> 无需手动 compensation，精度更高且是 Genesis 标准用法。
+>
+> **前置检查**：远程 Docker 镜像中 Genesis 版本可能旧于本地源码，需确认远程镜像是否支持 `local_point` 参数。
+
+实验流程：
+
+1. approach 逐 waypoint 下降，从 `QUAT_START_WP` 开始检测 `delta_z`。
+2. 若 `abs(delta_z) > LEVEL_TOLERANCE`，执行 `roll_recovery()`（粗搜 ±16 deg / 2 deg 步长 → 细搜 ±2 deg / 1 deg 步长）。
+3. **仅当调平成功**（`delta_z` 已在阈值内）时，才进入 replan；调平失败则用 best-effort pose 继续下一个 waypoint 正常下降。
+4. 调平成功的 waypoint 标记为 `tune_roll` 阶段（PNG 中可见区分）。
+5. 测量调平后的 **inner surface midpoint** 位置 `mid_leveled`（而非 link origin `gc_leveled`）。
+6. 从 `mid_leveled` 出发，向 `pre_close_target`（`cube_init + off + [0,0,approach_z]`）做**多步 midpoint 位置插值**（`N_REPLAN_WPS=4`）。每步测量当前 `compensation = gc_pos − mid`，IK 目标 = `desired_mid + compensation`。
+7. 多步 replan 的执行轨迹标记为 `approach_replan` 阶段。
+8. 每步记录诊断指标（`desired_mid`、`ik_target`、`compensation`、`mid_actual`、`mid_error_to_desired`、`mid_error_to_final_target`）。
+9. 无论 `pre_close_replan` 诊断是否通过，后续都继续执行 `close/close_hold/lift`；该检查当前仅用于诊断，不作为拦截 gate。
 
 
 
 
-  
 
-### 10.2 
-
-其实从现在的pngs 中可以看到，即使调平 Jaws 的 delta-z ，jaws mid-point 水平方向跟 cube center xy 还是有 gap。这个大概需要offset_xy 调整 ？
 
 
 

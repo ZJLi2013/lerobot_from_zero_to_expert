@@ -344,13 +344,14 @@ def main() -> None:
         for _ in range(args.settle_steps):
             scene.step()
 
-    def solve_ik_seeded(pos, grip_deg, seed_rad, quat_target=None):
+    def solve_ik_seeded(pos, grip_deg, seed_rad, quat_target=None, local_point=None):
         q = to_numpy(
             so101.inverse_kinematics(
                 link=ee,
                 pos=np.array(pos, dtype=np.float32),
                 quat=quat_target,
                 init_qpos=seed_rad,
+                local_point=np.array(local_point, dtype=np.float32) if local_point is not None else None,
                 max_solver_iters=50,
                 damping=0.02,
             )
@@ -359,6 +360,17 @@ def main() -> None:
         if so101.n_dofs >= 6:
             q_deg[5] = grip_deg
         return q_deg
+
+    def compute_mid_local_point():
+        """Compute jaws inner-surface midpoint in grasp_center link local frame."""
+        jaw = measure_jaw_dz()
+        mid_world = np.array(jaw["mid_inner_surface"], dtype=np.float64)
+        gc_pos = np.array(to_numpy(ee.get_pos()), dtype=np.float64)
+        gc_quat = to_numpy(ee.get_quat())
+        offset_world = mid_world - gc_pos
+        rot = quat_to_rotmat(gc_quat)
+        offset_local = rot.T @ offset_world
+        return offset_local
 
     def get_jaw_box_world(link, cfg):
         link_pos = to_numpy(link.get_pos())
@@ -581,23 +593,48 @@ def main() -> None:
                             "roll_delta_deg": float(np.degrees(best_feasible["roll_delta_rad"])),
                         }
                     )
-                    # Leveling succeeded — multi-step replan from leveled pose to pre-close target.
+                    # Leveling succeeded — multi-step replan using local_point (Genesis v0.4.1+).
                     descent_wps.append(wp)
                     descent_wp_phases.append("tune_roll")
                     replan_seed = np.deg2rad(np.array(wp, dtype=np.float32))
-                    gc_leveled = get_gc_pos_for_qdeg(wp, settle_steps=2)
+                    so101.set_qpos(replan_seed)
+                    so101.control_dofs_position(replan_seed, dof_idx)
+                    for _ in range(3):
+                        scene.step()
+                    mid_local_pt = compute_mid_local_point()
+                    jaw_at_level = measure_jaw_dz()
+                    mid_leveled = np.array(jaw_at_level["mid_inner_surface"], dtype=np.float64)
                     replan_prev_rad = replan_seed.copy()
+                    replan_step_details = []
                     for ri in range(N_REPLAN_WPS):
                         alpha = (ri + 1) / N_REPLAN_WPS
-                        rp_pos = gc_leveled + alpha * (pre_close_target - gc_leveled)
+                        desired_mid = mid_leveled + alpha * (pre_close_target - mid_leveled)
                         rp_wp = solve_ik_seeded(
-                            rp_pos,
+                            desired_mid,
                             args.gripper_open,
                             replan_prev_rad,
                             quat_target=quat_ref,
+                            local_point=mid_local_pt,
                         )
                         replan_wps.append(rp_wp)
                         replan_prev_rad = np.deg2rad(np.array(rp_wp, dtype=np.float32))
+                        so101.set_qpos(replan_prev_rad)
+                        so101.control_dofs_position(replan_prev_rad, dof_idx)
+                        for _ in range(2):
+                            scene.step()
+                        rp_mid_actual = np.array(measure_jaw_dz()["mid_inner_surface"], dtype=np.float64)
+                        rp_gc_actual = np.array(to_numpy(ee.get_pos()), dtype=np.float64)
+                        replan_step_details.append(
+                            {
+                                "step": int(ri),
+                                "alpha": float(alpha),
+                                "desired_mid": [float(v) for v in desired_mid.tolist()],
+                                "mid_actual": [float(v) for v in rp_mid_actual.tolist()],
+                                "gc_actual": [float(v) for v in rp_gc_actual.tolist()],
+                                "mid_error_to_desired": float(np.linalg.norm(rp_mid_actual - desired_mid)),
+                                "mid_error_to_final_target": float(np.linalg.norm(rp_mid_actual - pre_close_target)),
+                            }
+                        )
                     replan_eval = evaluate_qdeg_against_target(
                         replan_wps[-1], pre_close_target, settle_steps=3
                     )
@@ -606,12 +643,14 @@ def main() -> None:
                             "trigger_wp_idx": int(i),
                             "leveled_dz": float(dz_wp),
                             "n_replan_wps": int(N_REPLAN_WPS),
-                            "gc_leveled": [float(v) for v in gc_leveled.tolist()],
+                            "mid_local_point": [float(v) for v in mid_local_pt.tolist()],
+                            "mid_leveled": [float(v) for v in mid_leveled.tolist()],
                             "target_pos": [float(v) for v in pre_close_target.tolist()],
                             "dz_abs": float(abs(replan_eval["dz_inner_surface"])),
                             "gc_pos_error": float(replan_eval["gc_pos_error"]),
                             "gc_xy_drift": float(replan_eval["gc_xy_drift"]),
                             "mid_surface_xy_drift": float(replan_eval["mid_surface_xy_drift"]),
+                            "step_details": replan_step_details,
                         }
                     )
                     prev_wp_deg = np.array(replan_wps[-1], dtype=np.float64)
