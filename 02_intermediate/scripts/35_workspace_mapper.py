@@ -1,0 +1,575 @@
+"""
+SO-101 Workspace Feasibility Mapper
+
+Scans a 3D grid (no cube in scene, pure kinematics) and measures at each point:
+  - IK position accuracy (jaw midpoint vs target)
+  - Jaw delta_z (parallelism / levelness)
+  - Jaw gap (distance between inner surfaces along closing axis)
+
+Output: feasibility map + cube placement recommendations.
+
+Strategy:
+  For each (x, y) column, descend from z_max to z_min using the previous
+  z-level's IK solution as seed. This mimics an actual approach trajectory
+  and gives physically meaningful IK solutions (vs. jumping from home).
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import time
+import xml.etree.ElementTree as ET
+from pathlib import Path
+
+import numpy as np
+
+
+# ---------------------------------------------------------------------------
+# Utility helpers (shared pattern with 33/34 scripts)
+# ---------------------------------------------------------------------------
+
+def ensure_display() -> None:
+    if os.environ.get("DISPLAY"):
+        return
+    xvfb = subprocess.run(["which", "Xvfb"], capture_output=True)
+    if xvfb.returncode != 0:
+        return
+    proc = subprocess.Popen(
+        ["Xvfb", ":99", "-screen", "0", "1280x1024x24", "-ac", "+extension", "GLX"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    os.environ["DISPLAY"] = ":99"
+    time.sleep(2)
+    if proc.poll() is None:
+        print(f"[display] Xvfb started (PID={proc.pid})")
+
+
+def to_numpy(t):
+    arr = t.cpu().numpy() if hasattr(t, "cpu") else np.array(t)
+    return arr[0] if arr.ndim > 1 else arr
+
+
+def parse_vec(s):
+    return np.array([float(v) for v in s.split()], dtype=np.float64)
+
+
+def normalize(v):
+    v = np.array(v, dtype=np.float64)
+    n = np.linalg.norm(v)
+    if n < 1e-12:
+        return np.zeros_like(v)
+    return v / n
+
+
+def transform_point(link_pos, link_quat, local_pos):
+    return np.array(link_pos, dtype=np.float64) + quat_to_rotmat(link_quat) @ np.array(
+        local_pos, dtype=np.float64
+    )
+
+
+def quat_to_rotmat(q):
+    w, x, y, z = q
+    return np.array(
+        [
+            [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+            [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+            [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+        ],
+        dtype=np.float64,
+    )
+
+
+def find_so101_xml(user_xml: str | None) -> Path | None:
+    if user_xml:
+        p = Path(user_xml)
+        return p if p.exists() else None
+    here = Path(__file__).resolve().parent
+    candidates = [
+        here / "assets" / "so101_new_calib_v4.xml",
+        here / "assets" / "so101_new_calib.xml",
+        Path("02_intermediate/scripts/assets/so101_new_calib_v4.xml"),
+        Path("02_intermediate/scripts/assets/so101_new_calib.xml"),
+    ]
+    for p in candidates:
+        if p.exists():
+            return p
+    return None
+
+
+def load_jaw_box_config(xml_path):
+    tree = ET.parse(xml_path)
+    root = tree.getroot()
+    worldbody = root.find("worldbody")
+    if worldbody is None:
+        raise RuntimeError("worldbody not found in XML")
+    jaw_boxes = {}
+
+    def walk_body(body):
+        body_name = body.attrib.get("name")
+        for geom in body.findall("geom"):
+            geom_name = geom.attrib.get("name")
+            if geom_name in {"fixed_jaw_box", "moving_jaw_box"}:
+                jaw_boxes[geom_name] = {
+                    "body_name": body_name,
+                    "pos": parse_vec(geom.attrib["pos"]),
+                    "size": parse_vec(geom.attrib["size"]),
+                }
+        for child in body.findall("body"):
+            walk_body(child)
+
+    for body in worldbody.findall("body"):
+        walk_body(body)
+
+    missing = {"fixed_jaw_box", "moving_jaw_box"} - set(jaw_boxes.keys())
+    if missing:
+        raise RuntimeError(f"jaw box geom not found in XML: {sorted(missing)}")
+    return jaw_boxes
+
+
+def parse_range(s: str) -> np.ndarray:
+    """Parse 'start:stop:step' or 'v1,v2,...' into a sorted array."""
+    if ":" in s:
+        parts = s.split(":")
+        start, stop, step = float(parts[0]), float(parts[1]), float(parts[2])
+        return np.arange(start, stop + step * 0.49, step)
+    return np.array(sorted(float(v) for v in s.split(",")))
+
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+HOME_DEG = np.array([0.0, -30.0, 90.0, -60.0, 0.0, 0.0], dtype=np.float32)
+KP = np.array([500.0, 500.0, 400.0, 400.0, 300.0, 200.0], dtype=np.float32)
+KV = np.array([50.0, 50.0, 40.0, 40.0, 30.0, 20.0], dtype=np.float32)
+
+POS_ERROR_THRESH = 0.005  # 5 mm
+DELTA_Z_THRESH = 0.004    # 4 mm  (from prior experiments)
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    ensure_display()
+
+    ap = argparse.ArgumentParser(
+        description="SO-101 3-D workspace feasibility mapper (no cube, pure kinematics)"
+    )
+    ap.add_argument("--exp-id", default="workspace_map")
+    ap.add_argument("--xml", default=None)
+    ap.add_argument("--save", default="/output")
+    ap.add_argument("--cpu", action="store_true")
+    ap.add_argument("--sim-dt", type=float, default=1.0 / 30.0)
+    ap.add_argument("--sim-substeps", type=int, default=4)
+    ap.add_argument("--settle-steps", type=int, default=8)
+    ap.add_argument("--gripper-open", type=float, default=20.0)
+    ap.add_argument(
+        "--grid-x", default="0.10:0.22:0.01",
+        help="X range as start:stop:step or v1,v2,...",
+    )
+    ap.add_argument(
+        "--grid-y", default="-0.06:0.06:0.01",
+        help="Y range as start:stop:step or v1,v2,...",
+    )
+    ap.add_argument(
+        "--grid-z", default="0.015:0.12:0.005",
+        help="Z range as start:stop:step or v1,v2,...",
+    )
+    ap.add_argument(
+        "--cube-widths", default="0.02,0.025,0.03,0.04,0.05",
+        help="Cube side-lengths (width) to evaluate feasibility for",
+    )
+    ap.add_argument(
+        "--pos-error-thresh", type=float, default=POS_ERROR_THRESH,
+        help="Position error threshold (m) for 'reachable'",
+    )
+    ap.add_argument(
+        "--delta-z-thresh", type=float, default=DELTA_Z_THRESH,
+        help="Jaw delta-z threshold (m) for 'jaws_level'",
+    )
+    args = ap.parse_args()
+
+    xml = find_so101_xml(args.xml)
+    if xml is None:
+        raise RuntimeError("SO101 xml not found")
+
+    xs = parse_range(args.grid_x)
+    ys = parse_range(args.grid_y)
+    zs = parse_range(args.grid_z)
+    zs_desc = np.sort(zs)[::-1]  # high → low for descent chain
+    cube_widths = sorted(float(v) for v in args.cube_widths.split(","))
+
+    n_total = len(xs) * len(ys) * len(zs)
+    n_columns = len(xs) * len(ys)
+    print(f"[config] grid: X={len(xs)}  Y={len(ys)}  Z={len(zs)}  → {n_total} pts, {n_columns} columns")
+    print(f"[config] X: [{xs[0]:.3f} .. {xs[-1]:.3f}]")
+    print(f"[config] Y: [{ys[0]:.3f} .. {ys[-1]:.3f}]")
+    print(f"[config] Z: [{zs_desc[-1]:.4f} .. {zs_desc[0]:.4f}]")
+    print(f"[config] cube widths: {cube_widths}")
+    print(f"[config] thresholds: pos_error={args.pos_error_thresh}m  delta_z={args.delta_z_thresh}m")
+
+    # -----------------------------------------------------------------------
+    # Genesis setup
+    # -----------------------------------------------------------------------
+    import genesis as gs
+
+    gs.init(backend=(gs.cpu if args.cpu else gs.gpu), logging_level="warning")
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(dt=args.sim_dt, substeps=args.sim_substeps),
+        rigid_options=gs.options.RigidOptions(
+            enable_collision=True, enable_joint_limit=True, box_box_detection=True,
+        ),
+        show_viewer=False,
+    )
+    scene.add_entity(gs.morphs.Plane())
+    so101 = scene.add_entity(gs.morphs.MJCF(file=str(xml), pos=(0.0, 0.0, 0.0)))
+    scene.build()
+
+    dof_idx = np.arange(so101.n_dofs)
+    so101.set_dofs_kp(KP[: so101.n_dofs], dof_idx)
+    so101.set_dofs_kv(KV[: so101.n_dofs], dof_idx)
+    home_deg = HOME_DEG[: so101.n_dofs]
+    home_rad = np.deg2rad(home_deg)
+
+    ee = so101.get_link("grasp_center")
+    fixed_jaw = so101.get_link("gripper")
+    moving_jaw = so101.get_link("moving_jaw_so101_v1")
+    jaw_box_cfg = load_jaw_box_config(xml)
+
+    # -----------------------------------------------------------------------
+    # Jaw geometry helpers
+    # -----------------------------------------------------------------------
+
+    def reset_home():
+        so101.set_qpos(home_rad)
+        so101.control_dofs_position(home_rad, dof_idx)
+        so101.zero_all_dofs_velocity()
+        for _ in range(args.settle_steps):
+            scene.step()
+
+    def solve_ik(pos, grip_deg, seed_rad, local_point=None):
+        kwargs = dict(
+            link=ee,
+            pos=np.array(pos, dtype=np.float32),
+            quat=None,
+            init_qpos=seed_rad,
+            max_solver_iters=50,
+            damping=0.02,
+        )
+        if local_point is not None:
+            kwargs["local_point"] = np.array(local_point, dtype=np.float32)
+        q = to_numpy(so101.inverse_kinematics(**kwargs))
+        q_deg = np.rad2deg(q)
+        if so101.n_dofs >= 6:
+            q_deg[5] = grip_deg
+        return q_deg
+
+    def get_jaw_box_world(link, cfg):
+        link_pos = to_numpy(link.get_pos())
+        link_quat = to_numpy(link.get_quat())
+        center_world = transform_point(link_pos, link_quat, cfg["pos"])
+        rot = quat_to_rotmat(link_quat)
+        thickness_axis_local = np.zeros(3, dtype=np.float64)
+        thickness_axis_local[int(np.argmin(cfg["size"]))] = 1.0
+        thickness_axis_world = normalize(rot @ thickness_axis_local)
+        return {
+            "center_world": center_world,
+            "thickness_axis_world": thickness_axis_world,
+            "half_thickness": float(np.min(cfg["size"])),
+        }
+
+    def measure_jaw_state():
+        fixed_box = get_jaw_box_world(fixed_jaw, jaw_box_cfg["fixed_jaw_box"])
+        moving_box = get_jaw_box_world(moving_jaw, jaw_box_cfg["moving_jaw_box"])
+        fa = fixed_box["thickness_axis_world"]
+        ma = moving_box["thickness_axis_world"]
+        f2m = moving_box["center_world"] - fixed_box["center_world"]
+        m2f = -f2m
+        fi = fa * np.sign(np.dot(f2m, fa) or 1.0)
+        mi = ma * np.sign(np.dot(m2f, ma) or 1.0)
+        fixed_inner = fixed_box["center_world"] + fi * fixed_box["half_thickness"]
+        moving_inner = moving_box["center_world"] + mi * moving_box["half_thickness"]
+        mid = 0.5 * (fixed_inner + moving_inner)
+
+        gap_vec = moving_inner - fixed_inner
+        jaw_gap = float(np.linalg.norm(gap_vec))
+        closing_axis = normalize(gap_vec) if jaw_gap > 1e-6 else np.array([1.0, 0.0, 0.0])
+        closing_axis_tilt_deg = float(np.degrees(np.arcsin(np.clip(abs(closing_axis[2]), 0, 1))))
+        delta_z = float(moving_inner[2] - fixed_inner[2])
+
+        return {
+            "mid": mid,
+            "fixed_inner": fixed_inner,
+            "moving_inner": moving_inner,
+            "delta_z": delta_z,
+            "jaw_gap": jaw_gap,
+            "closing_axis": closing_axis,
+            "closing_axis_tilt_deg": closing_axis_tilt_deg,
+        }
+
+    def compute_mid_local_point():
+        jaw = measure_jaw_state()
+        mid_world = np.array(jaw["mid"], dtype=np.float64)
+        gc_pos = np.array(to_numpy(ee.get_pos()), dtype=np.float64)
+        gc_quat = to_numpy(ee.get_quat())
+        rot = quat_to_rotmat(gc_quat)
+        return rot.T @ (mid_world - gc_pos)
+
+    # -----------------------------------------------------------------------
+    # Compute mid_local_point at reference pose (home + gripper_open)
+    # -----------------------------------------------------------------------
+    reset_home()
+    q_ref = home_deg.copy()
+    if so101.n_dofs >= 6:
+        q_ref[5] = args.gripper_open
+    q_ref_rad = np.deg2rad(np.array(q_ref, dtype=np.float32))
+    so101.set_qpos(q_ref_rad)
+    so101.control_dofs_position(q_ref_rad, dof_idx)
+    for _ in range(10):
+        scene.step()
+    mid_local_pt = compute_mid_local_point()
+    print(f"[init] mid_local_point = [{mid_local_pt[0]:.6f}, {mid_local_pt[1]:.6f}, {mid_local_pt[2]:.6f}]")
+
+    # -----------------------------------------------------------------------
+    # Grid scan
+    # -----------------------------------------------------------------------
+    results = []
+    col_idx = 0
+    t_start = time.time()
+
+    for xi, x in enumerate(xs):
+        for yi, y in enumerate(ys):
+            col_idx += 1
+            reset_home()
+
+            # Seed from a safe high position
+            safe_z = float(zs_desc[0]) + 0.05
+            q_safe = solve_ik([x, y, safe_z], args.gripper_open, home_rad, local_point=mid_local_pt)
+            seed_rad = np.deg2rad(np.array(q_safe, dtype=np.float32))
+
+            for zi, z in enumerate(zs_desc):
+                target = np.array([x, y, z], dtype=np.float64)
+                q_deg = solve_ik(target, args.gripper_open, seed_rad, local_point=mid_local_pt)
+                q_rad = np.deg2rad(np.array(q_deg, dtype=np.float32))
+
+                so101.set_qpos(q_rad)
+                so101.control_dofs_position(q_rad, dof_idx)
+                for _ in range(args.settle_steps):
+                    scene.step()
+
+                jaw = measure_jaw_state()
+                mid_actual = jaw["mid"]
+                gc_pos = np.array(to_numpy(ee.get_pos()), dtype=np.float64)
+
+                err_3d = float(np.linalg.norm(mid_actual - target))
+                err_xy = float(np.linalg.norm(mid_actual[:2] - target[:2]))
+                err_z = float(abs(mid_actual[2] - target[2]))
+
+                reachable = err_3d < args.pos_error_thresh
+                jaws_level = abs(jaw["delta_z"]) < args.delta_z_thresh
+
+                results.append({
+                    "x": round(float(x), 4),
+                    "y": round(float(y), 4),
+                    "z": round(float(z), 4),
+                    "mid_actual": [round(float(v), 5) for v in mid_actual.tolist()],
+                    "gc_pos": [round(float(v), 5) for v in gc_pos.tolist()],
+                    "pos_error_3d": round(err_3d, 5),
+                    "pos_error_xy": round(err_xy, 5),
+                    "pos_error_z": round(err_z, 5),
+                    "delta_z": round(float(jaw["delta_z"]), 5),
+                    "jaw_gap": round(float(jaw["jaw_gap"]), 5),
+                    "closing_tilt_deg": round(jaw["closing_axis_tilt_deg"], 2),
+                    "reachable": reachable,
+                    "jaws_level": jaws_level,
+                })
+
+                seed_rad = q_rad  # chain for next z-level
+
+            elapsed = time.time() - t_start
+            eta = elapsed / col_idx * (n_columns - col_idx)
+            print(
+                f"  col {col_idx:4d}/{n_columns}  ({x:+.3f}, {y:+.3f})  "
+                f"[{elapsed:.0f}s elapsed, ~{eta:.0f}s ETA]"
+            )
+
+    scan_time = time.time() - t_start
+    print(f"\n{'=' * 60}")
+    print(f"Grid scan complete: {len(results)} points in {scan_time:.1f}s")
+
+    # -----------------------------------------------------------------------
+    # Analysis
+    # -----------------------------------------------------------------------
+
+    # Per-Z-slice stats
+    z_slices = {}
+    for z_val in np.sort(zs):
+        z_key = round(float(z_val), 4)
+        pts = [r for r in results if r["z"] == z_key]
+        n_pts = len(pts)
+        if n_pts == 0:
+            continue
+        n_reach = sum(1 for p in pts if p["reachable"])
+        n_level = sum(1 for p in pts if p["jaws_level"])
+        n_both = sum(1 for p in pts if p["reachable"] and p["jaws_level"])
+        gaps = [p["jaw_gap"] for p in pts if p["reachable"] and p["jaws_level"]]
+        z_slices[z_key] = {
+            "n_points": n_pts,
+            "reachable": n_reach,
+            "jaws_level": n_level,
+            "feasible_base": n_both,
+            "feasible_base_pct": round(n_both / n_pts * 100, 1),
+            "jaw_gap_min": round(min(gaps), 5) if gaps else None,
+            "jaw_gap_max": round(max(gaps), 5) if gaps else None,
+            "jaw_gap_mean": round(float(np.mean(gaps)), 5) if gaps else None,
+        }
+
+    # Cube-width recommendations
+    cube_recommendations = []
+    for cw in cube_widths:
+        feasible = [
+            r for r in results
+            if r["reachable"] and r["jaws_level"] and r["jaw_gap"] > cw
+        ]
+        if not feasible:
+            cube_recommendations.append({
+                "cube_width": cw,
+                "feasible_count": 0,
+                "feasible_zone": None,
+                "recommended_configs": [],
+            })
+            print(f"\n  cube_width={cw:.3f}m: NO feasible points")
+            continue
+
+        zone = {
+            "x_min": round(min(p["x"] for p in feasible), 4),
+            "x_max": round(max(p["x"] for p in feasible), 4),
+            "y_min": round(min(p["y"] for p in feasible), 4),
+            "y_max": round(max(p["y"] for p in feasible), 4),
+            "z_min": round(min(p["z"] for p in feasible), 4),
+            "z_max": round(max(p["z"] for p in feasible), 4),
+        }
+
+        # For each candidate cube height, find the placement range at z = height/2
+        z_step = float(zs[1] - zs[0]) if len(zs) > 1 else 0.005
+        z_tol = z_step * 0.6
+        candidate_heights = sorted(set(
+            [cw, 2 * cw, 3 * cw, 4 * cw, 0.04, 0.06, 0.08, 0.10, 0.12]
+        ))
+        rec_configs = []
+        for h in candidate_heights:
+            if h < cw:
+                continue
+            cz = h / 2.0
+            nearby = [p for p in feasible if abs(p["z"] - cz) < z_tol]
+            if not nearby:
+                continue
+            # Compute centroid and margins
+            xs_f = [p["x"] for p in nearby]
+            ys_f = [p["y"] for p in nearby]
+            x_range = [round(min(xs_f), 4), round(max(xs_f), 4)]
+            y_range = [round(min(ys_f), 4), round(max(ys_f), 4)]
+            x_center = round(np.mean(xs_f), 4)
+            y_center = round(np.mean(ys_f), 4)
+            # Margin: how far is the centroid from the zone boundary?
+            x_margin = round(min(x_center - x_range[0], x_range[1] - x_center), 4)
+            y_margin = round(min(y_center - y_range[0], y_range[1] - y_center), 4)
+            avg_gap = round(float(np.mean([p["jaw_gap"] for p in nearby])), 5)
+            avg_err = round(float(np.mean([p["pos_error_3d"] for p in nearby])), 5)
+
+            rec_configs.append({
+                "cube_size": [cw, cw, round(h, 4)],
+                "cube_center_z": round(cz, 4),
+                "placement_x_range": x_range,
+                "placement_y_range": y_range,
+                "placement_centroid": [x_center, y_center],
+                "x_margin": x_margin,
+                "y_margin": y_margin,
+                "feasible_points_at_z": len(nearby),
+                "avg_jaw_gap": avg_gap,
+                "avg_pos_error": avg_err,
+            })
+
+        rec_configs.sort(key=lambda r: -r["feasible_points_at_z"])
+
+        cube_recommendations.append({
+            "cube_width": cw,
+            "feasible_count": len(feasible),
+            "feasible_zone": zone,
+            "recommended_configs": rec_configs,
+        })
+
+        print(f"\n  cube_width={cw:.3f}m: {len(feasible)} feasible points")
+        print(
+            f"    zone: X[{zone['x_min']:.3f}, {zone['x_max']:.3f}]  "
+            f"Y[{zone['y_min']:.3f}, {zone['y_max']:.3f}]  "
+            f"Z[{zone['z_min']:.4f}, {zone['z_max']:.4f}]"
+        )
+        if rec_configs:
+            best = rec_configs[0]
+            print(
+                f"    BEST config: cube ({cw} x {cw} x {best['cube_size'][2]}),  "
+                f"place at X{best['placement_x_range']}, Y{best['placement_y_range']},  "
+                f"center_z={best['cube_center_z']},  "
+                f"n_points={best['feasible_points_at_z']},  "
+                f"avg_gap={best['avg_jaw_gap']:.4f}m"
+            )
+
+    # Overall stats
+    n_reachable = sum(1 for r in results if r["reachable"])
+    n_level = sum(1 for r in results if r["jaws_level"])
+    n_both = sum(1 for r in results if r["reachable"] and r["jaws_level"])
+    all_gaps = [r["jaw_gap"] for r in results]
+
+    summary = {
+        "exp_id": args.exp_id,
+        "xml_path": str(xml),
+        "scan_time_s": round(scan_time, 1),
+        "grid": {
+            "x": [round(float(v), 4) for v in xs.tolist()],
+            "y": [round(float(v), 4) for v in ys.tolist()],
+            "z": [round(float(v), 4) for v in np.sort(zs).tolist()],
+            "total_points": len(results),
+            "n_columns": n_columns,
+        },
+        "thresholds": {
+            "pos_error_m": args.pos_error_thresh,
+            "delta_z_m": args.delta_z_thresh,
+        },
+        "gripper_open_deg": float(args.gripper_open),
+        "mid_local_point": [round(float(v), 6) for v in mid_local_pt.tolist()],
+        "overall_stats": {
+            "reachable_count": n_reachable,
+            "reachable_pct": round(n_reachable / len(results) * 100, 1),
+            "jaws_level_count": n_level,
+            "jaws_level_pct": round(n_level / len(results) * 100, 1),
+            "feasible_base_count": n_both,
+            "feasible_base_pct": round(n_both / len(results) * 100, 1),
+            "jaw_gap_min": round(min(all_gaps), 5),
+            "jaw_gap_max": round(max(all_gaps), 5),
+            "jaw_gap_mean": round(float(np.mean(all_gaps)), 5),
+        },
+        "z_slices": z_slices,
+        "cube_recommendations": cube_recommendations,
+        "grid_points": results,
+    }
+
+    out_root = Path(args.save) / args.exp_id
+    out_root.mkdir(parents=True, exist_ok=True)
+    out_path = out_root / "workspace_summary.json"
+    out_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    print(f"\n[saved] {out_path}")
+
+    # Print compact summary (without grid_points)
+    compact = {k: v for k, v in summary.items() if k != "grid_points"}
+    print("\n" + json.dumps(compact, indent=2))
+
+
+if __name__ == "__main__":
+    main()
