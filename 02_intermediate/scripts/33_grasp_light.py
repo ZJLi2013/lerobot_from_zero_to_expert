@@ -200,7 +200,7 @@ HOME_DEG = np.array([0.0, -30.0, 90.0, -60.0, 0.0, 0.0], dtype=np.float32)
 KP = np.array([500.0, 500.0, 400.0, 400.0, 300.0, 200.0], dtype=np.float32)
 KV = np.array([50.0, 50.0, 40.0, 40.0, 30.0, 20.0], dtype=np.float32)
 CUBE_SIZE = (0.03, 0.03, 0.08)
-QUAT_START_WP = 0
+QUAT_START_WP = 2
 LEVEL_TOLERANCE = 0.004
 LEVEL_HOLD_STEPS = 8
 EXPORT_APPROACH_TAIL = 10
@@ -462,7 +462,7 @@ def main() -> None:
         return np.array(to_numpy(ee.get_pos()), dtype=np.float64)
 
     # trajectory (same skeleton as 03/12)
-    pos_pre = cube_init + off + np.array([0.0, 0.0, 0.10], dtype=np.float64)
+    pos_pre = cube_init + off + np.array([0.0, 0.0, 0.15], dtype=np.float64)
     q_pre = solve_ik_seeded(pos_pre, args.gripper_open, home_rad, quat_target=None)
     prev_rad = np.deg2rad(np.array(q_pre, dtype=np.float32))
     quat_ref = None
@@ -487,7 +487,7 @@ def main() -> None:
         so101.zero_all_dofs_velocity()
         for _ in range(5):
             scene.step()
-    n_descent_wps = 6
+    n_descent_wps = 10
     N_REPLAN_WPS = 4
     REPLAN_CLEARANCE = 0.03
     descent_wps = []
@@ -503,7 +503,7 @@ def main() -> None:
     prev_wp_deg = np.array(q_pre, dtype=np.float64)
     for i in range(n_descent_wps):
         frac = (i + 1) / n_descent_wps
-        z = 0.10 + (args.approach_z - 0.10) * frac
+        z = 0.15 + (args.approach_z - 0.15) * frac
         pos = cube_init + off + np.array([0.0, 0.0, z], dtype=np.float64)
         use_ref_quat = args.quat_mode == "pregrasp_flatten_yaw" and i >= QUAT_START_WP
         wp = solve_ik_seeded(
