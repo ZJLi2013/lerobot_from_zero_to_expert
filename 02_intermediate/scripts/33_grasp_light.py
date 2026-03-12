@@ -199,7 +199,7 @@ def lerp(a, b, n):
 HOME_DEG = np.array([0.0, -30.0, 90.0, -60.0, 0.0, 0.0], dtype=np.float32)
 KP = np.array([500.0, 500.0, 400.0, 400.0, 300.0, 200.0], dtype=np.float32)
 KV = np.array([50.0, 50.0, 40.0, 40.0, 30.0, 20.0], dtype=np.float32)
-CUBE_SIZE = (0.03, 0.03, 0.03)
+CUBE_SIZE = (0.03, 0.03, 0.08)
 QUAT_START_WP = 2
 LEVEL_TOLERANCE = 0.004
 LEVEL_HOLD_STEPS = 8
@@ -247,7 +247,7 @@ def main() -> None:
     ap.add_argument("--settle-steps", type=int, default=30)
     ap.add_argument("--cube-x", type=float, default=0.16)
     ap.add_argument("--cube-y", type=float, default=0.0)
-    ap.add_argument("--cube-z", type=float, default=0.015)
+    ap.add_argument("--cube-z", type=float, default=0.04)
     ap.add_argument("--cube-friction", type=float, default=1.5)
     ap.add_argument("--gripper-open", type=float, default=20.0)
     ap.add_argument("--gripper-close", type=float, default=2.0)
