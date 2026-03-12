@@ -1,17 +1,19 @@
 """
-SO-101 Workspace Feasibility Mapper
+SO-101 Workspace Feasibility Mapper (v2)
 
-Scans a 3D grid (no cube in scene, pure kinematics) and measures at each point:
-  - IK position accuracy (jaw midpoint vs target)
-  - Jaw delta_z (parallelism / levelness)
-  - Jaw gap (distance between inner surfaces along closing axis)
+Pure arm reachability scan — no cube in scene, no orientation constraints.
 
-Output: feasibility map + cube placement recommendations.
+For every point on a 3D grid, solve position-only IK and measure:
+  - pos_error:  jaw midpoint vs target  (reachability)
+  - delta_z:    height diff between two jaw inner surfaces  (levelness)
+  - jaw_gap:    distance between inner surfaces  (can it fit a cube?)
+
+Then filter by a single --cube-size to output the feasible grasp zone
+and recommended cube placement center.
 
 Strategy:
   For each (x, y) column, descend from z_max to z_min using the previous
-  z-level's IK solution as seed. This mimics an actual approach trajectory
-  and gives physically meaningful IK solutions (vs. jumping from home).
+  z-level's IK solution as seed (mimics a real approach trajectory).
 """
 
 from __future__ import annotations
@@ -28,7 +30,7 @@ import numpy as np
 
 
 # ---------------------------------------------------------------------------
-# Utility helpers (shared pattern with 33/34 scripts)
+# Utility helpers (shared with 33/34 scripts)
 # ---------------------------------------------------------------------------
 
 def ensure_display() -> None:
@@ -148,7 +150,7 @@ KP = np.array([500.0, 500.0, 400.0, 400.0, 300.0, 200.0], dtype=np.float32)
 KV = np.array([50.0, 50.0, 40.0, 40.0, 30.0, 20.0], dtype=np.float32)
 
 POS_ERROR_THRESH = 0.005  # 5 mm
-DELTA_Z_THRESH = 0.004    # 4 mm  (from prior experiments)
+DELTA_Z_THRESH = 0.004    # 4 mm
 
 
 # ---------------------------------------------------------------------------
@@ -159,7 +161,7 @@ def main() -> None:
     ensure_display()
 
     ap = argparse.ArgumentParser(
-        description="SO-101 3-D workspace feasibility mapper (no cube, pure kinematics)"
+        description="SO-101 workspace feasibility mapper v2 (pure arm reachability)"
     )
     ap.add_argument("--exp-id", default="workspace_map")
     ap.add_argument("--xml", default=None)
@@ -182,8 +184,8 @@ def main() -> None:
         help="Z range as start:stop:step or v1,v2,...",
     )
     ap.add_argument(
-        "--cube-widths", default="0.02,0.025,0.03,0.04,0.05",
-        help="Cube side-lengths (width) to evaluate feasibility for",
+        "--cube-size", type=float, default=0.03,
+        help="Cube side length (m). Feasible = reachable AND level AND jaw_gap > cube_size",
     )
     ap.add_argument(
         "--pos-error-thresh", type=float, default=POS_ERROR_THRESH,
@@ -202,16 +204,15 @@ def main() -> None:
     xs = parse_range(args.grid_x)
     ys = parse_range(args.grid_y)
     zs = parse_range(args.grid_z)
-    zs_desc = np.sort(zs)[::-1]  # high → low for descent chain
-    cube_widths = sorted(float(v) for v in args.cube_widths.split(","))
+    zs_desc = np.sort(zs)[::-1]
 
     n_total = len(xs) * len(ys) * len(zs)
     n_columns = len(xs) * len(ys)
-    print(f"[config] grid: X={len(xs)}  Y={len(ys)}  Z={len(zs)}  → {n_total} pts, {n_columns} columns")
+    print(f"[config] grid: X={len(xs)}  Y={len(ys)}  Z={len(zs)}  -> {n_total} pts, {n_columns} columns")
     print(f"[config] X: [{xs[0]:.3f} .. {xs[-1]:.3f}]")
     print(f"[config] Y: [{ys[0]:.3f} .. {ys[-1]:.3f}]")
     print(f"[config] Z: [{zs_desc[-1]:.4f} .. {zs_desc[0]:.4f}]")
-    print(f"[config] cube widths: {cube_widths}")
+    print(f"[config] cube_size: {args.cube_size}m")
     print(f"[config] thresholds: pos_error={args.pos_error_thresh}m  delta_z={args.delta_z_thresh}m")
 
     # -----------------------------------------------------------------------
@@ -264,6 +265,7 @@ def main() -> None:
         )
         if local_point is not None:
             kwargs["local_point"] = np.array(local_point, dtype=np.float32)
+        # No rot_mask, no quat — pure position IK only.
         q = to_numpy(so101.inverse_kinematics(**kwargs))
         q_deg = np.rad2deg(q)
         if so101.n_dofs >= 6:
@@ -348,7 +350,6 @@ def main() -> None:
             col_idx += 1
             reset_home()
 
-            # Seed from a safe high position
             safe_z = float(zs_desc[0]) + 0.05
             q_safe = solve_ik([x, y, safe_z], args.gripper_open, home_rad, local_point=mid_local_pt)
             seed_rad = np.deg2rad(np.array(q_safe, dtype=np.float32))
@@ -390,7 +391,7 @@ def main() -> None:
                     "jaws_level": jaws_level,
                 })
 
-                seed_rad = q_rad  # chain for next z-level
+                seed_rad = q_rad
 
             elapsed = time.time() - t_start
             eta = elapsed / col_idx * (n_columns - col_idx)
@@ -404,8 +405,25 @@ def main() -> None:
     print(f"Grid scan complete: {len(results)} points in {scan_time:.1f}s")
 
     # -----------------------------------------------------------------------
-    # Analysis
+    # Analysis — single cube_size filter
     # -----------------------------------------------------------------------
+
+    cube_size = args.cube_size
+    n_reachable = sum(1 for r in results if r["reachable"])
+    n_level = sum(1 for r in results if r["jaws_level"])
+    n_reach_and_level = sum(1 for r in results if r["reachable"] and r["jaws_level"])
+    all_gaps = [r["jaw_gap"] for r in results]
+
+    feasible = [
+        r for r in results
+        if r["reachable"] and r["jaws_level"] and r["jaw_gap"] > cube_size
+    ]
+
+    print(f"\n  Total scanned:    {len(results)}")
+    print(f"  Reachable:        {n_reachable}  ({n_reachable / len(results) * 100:.1f}%)")
+    print(f"  Jaws level:       {n_level}  ({n_level / len(results) * 100:.1f}%)")
+    print(f"  Reach + level:    {n_reach_and_level}")
+    print(f"  Grasp-feasible (gap > {cube_size}m): {len(feasible)}")
 
     # Per-Z-slice stats
     z_slices = {}
@@ -415,117 +433,54 @@ def main() -> None:
         n_pts = len(pts)
         if n_pts == 0:
             continue
-        n_reach = sum(1 for p in pts if p["reachable"])
-        n_level = sum(1 for p in pts if p["jaws_level"])
-        n_both = sum(1 for p in pts if p["reachable"] and p["jaws_level"])
+        n_r = sum(1 for p in pts if p["reachable"])
+        n_l = sum(1 for p in pts if p["jaws_level"])
+        n_rl = sum(1 for p in pts if p["reachable"] and p["jaws_level"])
+        n_f = sum(1 for p in pts if p["reachable"] and p["jaws_level"] and p["jaw_gap"] > cube_size)
         gaps = [p["jaw_gap"] for p in pts if p["reachable"] and p["jaws_level"]]
         z_slices[z_key] = {
             "n_points": n_pts,
-            "reachable": n_reach,
-            "jaws_level": n_level,
-            "feasible_base": n_both,
-            "feasible_base_pct": round(n_both / n_pts * 100, 1),
+            "reachable": n_r,
+            "jaws_level": n_l,
+            "reach_and_level": n_rl,
+            "feasible": n_f,
+            "feasible_pct": round(n_f / n_pts * 100, 1),
             "jaw_gap_min": round(min(gaps), 5) if gaps else None,
             "jaw_gap_max": round(max(gaps), 5) if gaps else None,
             "jaw_gap_mean": round(float(np.mean(gaps)), 5) if gaps else None,
         }
 
-    # Cube-width recommendations
-    cube_recommendations = []
-    for cw in cube_widths:
-        feasible = [
-            r for r in results
-            if r["reachable"] and r["jaws_level"] and r["jaw_gap"] > cw
-        ]
-        if not feasible:
-            cube_recommendations.append({
-                "cube_width": cw,
-                "feasible_count": 0,
-                "feasible_zone": None,
-                "recommended_configs": [],
-            })
-            print(f"\n  cube_width={cw:.3f}m: NO feasible points")
-            continue
-
-        zone = {
-            "x_min": round(min(p["x"] for p in feasible), 4),
-            "x_max": round(max(p["x"] for p in feasible), 4),
-            "y_min": round(min(p["y"] for p in feasible), 4),
-            "y_max": round(max(p["y"] for p in feasible), 4),
-            "z_min": round(min(p["z"] for p in feasible), 4),
-            "z_max": round(max(p["z"] for p in feasible), 4),
+    # Feasible zone bounds + recommended cube center
+    feasible_zone = None
+    recommended_cube_center = None
+    if feasible:
+        f_xs = [r["x"] for r in feasible]
+        f_ys = [r["y"] for r in feasible]
+        f_zs = [r["z"] for r in feasible]
+        feasible_zone = {
+            "x_min": round(min(f_xs), 4),
+            "x_max": round(max(f_xs), 4),
+            "y_min": round(min(f_ys), 4),
+            "y_max": round(max(f_ys), 4),
+            "z_min": round(min(f_zs), 4),
+            "z_max": round(max(f_zs), 4),
         }
+        recommended_cube_center = [
+            round(float(np.mean(f_xs)), 4),
+            round(float(np.mean(f_ys)), 4),
+            round(float(np.mean(f_zs)), 4),
+        ]
+        print(f"\n  Feasible zone:")
+        print(f"    X: [{feasible_zone['x_min']:.3f}, {feasible_zone['x_max']:.3f}]")
+        print(f"    Y: [{feasible_zone['y_min']:.3f}, {feasible_zone['y_max']:.3f}]")
+        print(f"    Z: [{feasible_zone['z_min']:.4f}, {feasible_zone['z_max']:.4f}]")
+        print(f"\n  Recommended cube center: {recommended_cube_center}")
+    else:
+        print(f"\n  *** NO feasible points for cube_size={cube_size}m ***")
 
-        # For each candidate cube height, find the placement range at z = height/2
-        z_step = float(zs[1] - zs[0]) if len(zs) > 1 else 0.005
-        z_tol = z_step * 0.6
-        candidate_heights = sorted(set(
-            [cw, 2 * cw, 3 * cw, 4 * cw, 0.04, 0.06, 0.08, 0.10, 0.12]
-        ))
-        rec_configs = []
-        for h in candidate_heights:
-            if h < cw:
-                continue
-            cz = h / 2.0
-            nearby = [p for p in feasible if abs(p["z"] - cz) < z_tol]
-            if not nearby:
-                continue
-            # Compute centroid and margins
-            xs_f = [p["x"] for p in nearby]
-            ys_f = [p["y"] for p in nearby]
-            x_range = [round(min(xs_f), 4), round(max(xs_f), 4)]
-            y_range = [round(min(ys_f), 4), round(max(ys_f), 4)]
-            x_center = round(np.mean(xs_f), 4)
-            y_center = round(np.mean(ys_f), 4)
-            # Margin: how far is the centroid from the zone boundary?
-            x_margin = round(min(x_center - x_range[0], x_range[1] - x_center), 4)
-            y_margin = round(min(y_center - y_range[0], y_range[1] - y_center), 4)
-            avg_gap = round(float(np.mean([p["jaw_gap"] for p in nearby])), 5)
-            avg_err = round(float(np.mean([p["pos_error_3d"] for p in nearby])), 5)
-
-            rec_configs.append({
-                "cube_size": [cw, cw, round(h, 4)],
-                "cube_center_z": round(cz, 4),
-                "placement_x_range": x_range,
-                "placement_y_range": y_range,
-                "placement_centroid": [x_center, y_center],
-                "x_margin": x_margin,
-                "y_margin": y_margin,
-                "feasible_points_at_z": len(nearby),
-                "avg_jaw_gap": avg_gap,
-                "avg_pos_error": avg_err,
-            })
-
-        rec_configs.sort(key=lambda r: -r["feasible_points_at_z"])
-
-        cube_recommendations.append({
-            "cube_width": cw,
-            "feasible_count": len(feasible),
-            "feasible_zone": zone,
-            "recommended_configs": rec_configs,
-        })
-
-        print(f"\n  cube_width={cw:.3f}m: {len(feasible)} feasible points")
-        print(
-            f"    zone: X[{zone['x_min']:.3f}, {zone['x_max']:.3f}]  "
-            f"Y[{zone['y_min']:.3f}, {zone['y_max']:.3f}]  "
-            f"Z[{zone['z_min']:.4f}, {zone['z_max']:.4f}]"
-        )
-        if rec_configs:
-            best = rec_configs[0]
-            print(
-                f"    BEST config: cube ({cw} x {cw} x {best['cube_size'][2]}),  "
-                f"place at X{best['placement_x_range']}, Y{best['placement_y_range']},  "
-                f"center_z={best['cube_center_z']},  "
-                f"n_points={best['feasible_points_at_z']},  "
-                f"avg_gap={best['avg_jaw_gap']:.4f}m"
-            )
-
-    # Overall stats
-    n_reachable = sum(1 for r in results if r["reachable"])
-    n_level = sum(1 for r in results if r["jaws_level"])
-    n_both = sum(1 for r in results if r["reachable"] and r["jaws_level"])
-    all_gaps = [r["jaw_gap"] for r in results]
+    # -----------------------------------------------------------------------
+    # Save
+    # -----------------------------------------------------------------------
 
     summary = {
         "exp_id": args.exp_id,
@@ -538,6 +493,7 @@ def main() -> None:
             "total_points": len(results),
             "n_columns": n_columns,
         },
+        "cube_size": cube_size,
         "thresholds": {
             "pos_error_m": args.pos_error_thresh,
             "delta_z_m": args.delta_z_thresh,
@@ -549,14 +505,17 @@ def main() -> None:
             "reachable_pct": round(n_reachable / len(results) * 100, 1),
             "jaws_level_count": n_level,
             "jaws_level_pct": round(n_level / len(results) * 100, 1),
-            "feasible_base_count": n_both,
-            "feasible_base_pct": round(n_both / len(results) * 100, 1),
+            "reach_and_level_count": n_reach_and_level,
+            "reach_and_level_pct": round(n_reach_and_level / len(results) * 100, 1),
+            "feasible_count": len(feasible),
+            "feasible_pct": round(len(feasible) / len(results) * 100, 1),
             "jaw_gap_min": round(min(all_gaps), 5),
             "jaw_gap_max": round(max(all_gaps), 5),
             "jaw_gap_mean": round(float(np.mean(all_gaps)), 5),
         },
+        "feasible_zone": feasible_zone,
+        "recommended_cube_center": recommended_cube_center,
         "z_slices": z_slices,
-        "cube_recommendations": cube_recommendations,
         "grid_points": results,
     }
 
@@ -566,7 +525,6 @@ def main() -> None:
     out_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     print(f"\n[saved] {out_path}")
 
-    # Print compact summary (without grid_points)
     compact = {k: v for k, v in summary.items() if k != "grid_points"}
     print("\n" + json.dumps(compact, indent=2))
 
