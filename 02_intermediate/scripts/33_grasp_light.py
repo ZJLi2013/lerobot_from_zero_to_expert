@@ -467,13 +467,14 @@ def main() -> None:
     prev_rad = np.deg2rad(np.array(q_pre, dtype=np.float32))
     quat_ref = None
     quat_ref_source = "disabled"
+    # Compute mid_local_point from pre-grasp pose (used for both approach and replan IK).
+    q_pre_rad = np.deg2rad(np.array(q_pre, dtype=np.float32))
+    so101.set_qpos(q_pre_rad)
+    so101.control_dofs_position(q_pre_rad, dof_idx)
+    for _ in range(5):
+        scene.step()
+    mid_local_pt_init = compute_mid_local_point()
     if args.quat_mode == "pregrasp_flatten_yaw":
-        # Build leveling-oriented quat_ref from pre_grasp reachable pose.
-        q_pre_rad = np.deg2rad(np.array(q_pre, dtype=np.float32))
-        so101.set_qpos(q_pre_rad)
-        so101.control_dofs_position(q_pre_rad, dof_idx)
-        for _ in range(5):
-            scene.step()
         quat_pre = [float(v) for v in to_numpy(ee.get_quat()).tolist()]
         # Keep yaw from current reachable branch, flatten roll/pitch to down-facing base.
         yaw = yaw_from_quat_x_axis(quat_pre)
@@ -511,6 +512,7 @@ def main() -> None:
             args.gripper_open,
             prev_rad,
             quat_target=quat_ref if use_ref_quat else None,
+            local_point=mid_local_pt_init,
         )
         # Gate: from quat-start waypoint onward, only allow deeper descend when dz_jaw is within tolerance.
         if args.quat_mode == "pregrasp_flatten_yaw" and i >= QUAT_START_WP:
@@ -536,6 +538,7 @@ def main() -> None:
                                 args.gripper_open,
                                 prev_rad,
                                 quat_target=q_try,
+                                local_point=mid_local_pt_init,
                             )
                             dz_try = measure_dz_for_qdeg(wp_try)
                             if abs(dz_try) < abs(best["dz"]):
@@ -573,6 +576,7 @@ def main() -> None:
                                 args.gripper_open,
                                 prev_rad,
                                 quat_target=q_try_f,
+                                local_point=mid_local_pt_init,
                             )
                             dz_try_f = measure_dz_for_qdeg(wp_try_f)
                             if (
