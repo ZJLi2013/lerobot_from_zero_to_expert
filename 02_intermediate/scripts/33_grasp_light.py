@@ -200,7 +200,7 @@ HOME_DEG = np.array([0.0, -30.0, 90.0, -60.0, 0.0, 0.0], dtype=np.float32)
 KP = np.array([500.0, 500.0, 400.0, 400.0, 300.0, 200.0], dtype=np.float32)
 KV = np.array([50.0, 50.0, 40.0, 40.0, 30.0, 20.0], dtype=np.float32)
 CUBE_SIZE = (0.03, 0.03, 0.08)
-QUAT_START_WP = 2
+QUAT_START_WP = 0
 LEVEL_TOLERANCE = 0.004
 LEVEL_HOLD_STEPS = 8
 EXPORT_APPROACH_TAIL = 10
@@ -674,7 +674,6 @@ def main() -> None:
                             "leveled_dz": float(dz_wp),
                             "n_replan_wps": int(N_REPLAN_WPS),
                             "mid_local_point": [float(v) for v in mid_local_pt.tolist()],
-                            "mid_leveled": [float(v) for v in mid_leveled.tolist()],
                             "mid_pregrasp": [float(v) for v in mid_pregrasp.tolist()],
                             "mid_grasp": [float(v) for v in mid_grasp.tolist()],
                             "dz_abs": float(abs(replan_eval["dz_inner_surface"])),
