@@ -344,18 +344,19 @@ def main() -> None:
         for _ in range(args.settle_steps):
             scene.step()
 
-    def solve_ik_seeded(pos, grip_deg, seed_rad, quat_target=None, local_point=None):
-        q = to_numpy(
-            so101.inverse_kinematics(
-                link=ee,
-                pos=np.array(pos, dtype=np.float32),
-                quat=quat_target,
-                init_qpos=seed_rad,
-                local_point=np.array(local_point, dtype=np.float32) if local_point is not None else None,
-                max_solver_iters=50,
-                damping=0.02,
-            )
+    def solve_ik_seeded(pos, grip_deg, seed_rad, quat_target=None, local_point=None, rot_mask=None):
+        kwargs = dict(
+            link=ee,
+            pos=np.array(pos, dtype=np.float32),
+            quat=quat_target,
+            init_qpos=seed_rad,
+            local_point=np.array(local_point, dtype=np.float32) if local_point is not None else None,
+            max_solver_iters=50,
+            damping=0.02,
         )
+        if rot_mask is not None:
+            kwargs["rot_mask"] = rot_mask
+        q = to_numpy(so101.inverse_kinematics(**kwargs))
         q_deg = np.rad2deg(q)
         if so101.n_dofs >= 6:
             q_deg[5] = grip_deg
@@ -615,6 +616,7 @@ def main() -> None:
                             replan_prev_rad,
                             quat_target=quat_ref,
                             local_point=mid_local_pt,
+                            rot_mask=[False, False, True],
                         )
                         replan_wps.append(rp_wp)
                         replan_prev_rad = np.deg2rad(np.array(rp_wp, dtype=np.float32))
