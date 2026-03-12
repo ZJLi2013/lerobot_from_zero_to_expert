@@ -33,6 +33,7 @@ import numpy as np
 # Utility helpers (shared with 33/34 scripts)
 # ---------------------------------------------------------------------------
 
+
 def ensure_display() -> None:
     if os.environ.get("DISPLAY"):
         return
@@ -150,12 +151,13 @@ KP = np.array([500.0, 500.0, 400.0, 400.0, 300.0, 200.0], dtype=np.float32)
 KV = np.array([50.0, 50.0, 40.0, 40.0, 30.0, 20.0], dtype=np.float32)
 
 POS_ERROR_THRESH = 0.005  # 5 mm
-DELTA_Z_THRESH = 0.004    # 4 mm
+DELTA_Z_THRESH = 0.004  # 4 mm
 
 
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
 
 def main() -> None:
     ensure_display()
@@ -170,29 +172,33 @@ def main() -> None:
     ap.add_argument("--sim-dt", type=float, default=1.0 / 30.0)
     ap.add_argument("--sim-substeps", type=int, default=4)
     ap.add_argument("--settle-steps", type=int, default=8)
-    ap.add_argument("--gripper-open", type=float, default=20.0)
+    ap.add_argument("--gripper-open", type=float, default=25.0)
     ap.add_argument(
-        "--grid-x", default="0.10:0.22:0.01",
+        "--grid-x",
+        default="0.08:0.26:0.01",
         help="X range as start:stop:step or v1,v2,...",
     )
     ap.add_argument(
-        "--grid-y", default="-0.06:0.06:0.01",
+        "--grid-y",
+        default="-0.10:0.10:0.01",
         help="Y range as start:stop:step or v1,v2,...",
     )
     ap.add_argument(
-        "--grid-z", default="0.015:0.12:0.005",
-        help="Z range as start:stop:step or v1,v2,...",
+        "--cube-size",
+        type=float,
+        default=0.03,
+        help="Cube full side length (m). Grid Z is fixed to cube_size/2 (resting on ground).",
     )
     ap.add_argument(
-        "--cube-size", type=float, default=0.03,
-        help="Cube side length (m). Feasible = reachable AND level AND jaw_gap > cube_size",
-    )
-    ap.add_argument(
-        "--pos-error-thresh", type=float, default=POS_ERROR_THRESH,
+        "--pos-error-thresh",
+        type=float,
+        default=POS_ERROR_THRESH,
         help="Position error threshold (m) for 'reachable'",
     )
     ap.add_argument(
-        "--delta-z-thresh", type=float, default=DELTA_Z_THRESH,
+        "--delta-z-thresh",
+        type=float,
+        default=DELTA_Z_THRESH,
         help="Jaw delta-z threshold (m) for 'jaws_level'",
     )
     args = ap.parse_args()
@@ -203,17 +209,18 @@ def main() -> None:
 
     xs = parse_range(args.grid_x)
     ys = parse_range(args.grid_y)
-    zs = parse_range(args.grid_z)
-    zs_desc = np.sort(zs)[::-1]
+    grasp_z = args.cube_size / 2.0
 
-    n_total = len(xs) * len(ys) * len(zs)
-    n_columns = len(xs) * len(ys)
-    print(f"[config] grid: X={len(xs)}  Y={len(ys)}  Z={len(zs)}  -> {n_total} pts, {n_columns} columns")
+    n_total = len(xs) * len(ys)
+    n_columns = n_total
+    print(f"[config] grid: X={len(xs)}  Y={len(ys)}  -> {n_total} pts")
     print(f"[config] X: [{xs[0]:.3f} .. {xs[-1]:.3f}]")
     print(f"[config] Y: [{ys[0]:.3f} .. {ys[-1]:.3f}]")
-    print(f"[config] Z: [{zs_desc[-1]:.4f} .. {zs_desc[0]:.4f}]")
+    print(f"[config] Z (grasp height): {grasp_z:.4f}  (cube_size/2)")
     print(f"[config] cube_size: {args.cube_size}m")
-    print(f"[config] thresholds: pos_error={args.pos_error_thresh}m  delta_z={args.delta_z_thresh}m")
+    print(
+        f"[config] thresholds: pos_error={args.pos_error_thresh}m  delta_z={args.delta_z_thresh}m"
+    )
 
     # -----------------------------------------------------------------------
     # Genesis setup
@@ -224,7 +231,9 @@ def main() -> None:
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(dt=args.sim_dt, substeps=args.sim_substeps),
         rigid_options=gs.options.RigidOptions(
-            enable_collision=True, enable_joint_limit=True, box_box_detection=True,
+            enable_collision=True,
+            enable_joint_limit=True,
+            box_box_detection=True,
         ),
         show_viewer=False,
     )
@@ -301,8 +310,12 @@ def main() -> None:
 
         gap_vec = moving_inner - fixed_inner
         jaw_gap = float(np.linalg.norm(gap_vec))
-        closing_axis = normalize(gap_vec) if jaw_gap > 1e-6 else np.array([1.0, 0.0, 0.0])
-        closing_axis_tilt_deg = float(np.degrees(np.arcsin(np.clip(abs(closing_axis[2]), 0, 1))))
+        closing_axis = (
+            normalize(gap_vec) if jaw_gap > 1e-6 else np.array([1.0, 0.0, 0.0])
+        )
+        closing_axis_tilt_deg = float(
+            np.degrees(np.arcsin(np.clip(abs(closing_axis[2]), 0, 1)))
+        )
         delta_z = float(moving_inner[2] - fixed_inner[2])
 
         return {
@@ -336,7 +349,9 @@ def main() -> None:
     for _ in range(10):
         scene.step()
     mid_local_pt = compute_mid_local_point()
-    print(f"[init] mid_local_point = [{mid_local_pt[0]:.6f}, {mid_local_pt[1]:.6f}, {mid_local_pt[2]:.6f}]")
+    print(
+        f"[init] mid_local_point = [{mid_local_pt[0]:.6f}, {mid_local_pt[1]:.6f}, {mid_local_pt[2]:.6f}]"
+    )
 
     # -----------------------------------------------------------------------
     # Grid scan
@@ -350,35 +365,33 @@ def main() -> None:
             col_idx += 1
             reset_home()
 
-            safe_z = float(zs_desc[0]) + 0.05
-            q_safe = solve_ik([x, y, safe_z], args.gripper_open, home_rad, local_point=mid_local_pt)
-            seed_rad = np.deg2rad(np.array(q_safe, dtype=np.float32))
+            target = np.array([x, y, grasp_z], dtype=np.float64)
+            q_deg = solve_ik(
+                target, args.gripper_open, home_rad, local_point=mid_local_pt
+            )
+            q_rad = np.deg2rad(np.array(q_deg, dtype=np.float32))
 
-            for zi, z in enumerate(zs_desc):
-                target = np.array([x, y, z], dtype=np.float64)
-                q_deg = solve_ik(target, args.gripper_open, seed_rad, local_point=mid_local_pt)
-                q_rad = np.deg2rad(np.array(q_deg, dtype=np.float32))
+            so101.set_qpos(q_rad)
+            so101.control_dofs_position(q_rad, dof_idx)
+            for _ in range(args.settle_steps):
+                scene.step()
 
-                so101.set_qpos(q_rad)
-                so101.control_dofs_position(q_rad, dof_idx)
-                for _ in range(args.settle_steps):
-                    scene.step()
+            jaw = measure_jaw_state()
+            mid_actual = jaw["mid"]
+            gc_pos = np.array(to_numpy(ee.get_pos()), dtype=np.float64)
 
-                jaw = measure_jaw_state()
-                mid_actual = jaw["mid"]
-                gc_pos = np.array(to_numpy(ee.get_pos()), dtype=np.float64)
+            err_3d = float(np.linalg.norm(mid_actual - target))
+            err_xy = float(np.linalg.norm(mid_actual[:2] - target[:2]))
+            err_z = float(abs(mid_actual[2] - target[2]))
 
-                err_3d = float(np.linalg.norm(mid_actual - target))
-                err_xy = float(np.linalg.norm(mid_actual[:2] - target[:2]))
-                err_z = float(abs(mid_actual[2] - target[2]))
+            reachable = err_3d < args.pos_error_thresh
+            jaws_level = abs(jaw["delta_z"]) < args.delta_z_thresh
 
-                reachable = err_3d < args.pos_error_thresh
-                jaws_level = abs(jaw["delta_z"]) < args.delta_z_thresh
-
-                results.append({
+            results.append(
+                {
                     "x": round(float(x), 4),
                     "y": round(float(y), 4),
-                    "z": round(float(z), 4),
+                    "z": round(float(grasp_z), 4),
                     "mid_actual": [round(float(v), 5) for v in mid_actual.tolist()],
                     "gc_pos": [round(float(v), 5) for v in gc_pos.tolist()],
                     "pos_error_3d": round(err_3d, 5),
@@ -389,9 +402,8 @@ def main() -> None:
                     "closing_tilt_deg": round(jaw["closing_axis_tilt_deg"], 2),
                     "reachable": reachable,
                     "jaws_level": jaws_level,
-                })
-
-                seed_rad = q_rad
+                }
+            )
 
             elapsed = time.time() - t_start
             eta = elapsed / col_idx * (n_columns - col_idx)
@@ -415,40 +427,18 @@ def main() -> None:
     all_gaps = [r["jaw_gap"] for r in results]
 
     feasible = [
-        r for r in results
+        r
+        for r in results
         if r["reachable"] and r["jaws_level"] and r["jaw_gap"] > cube_size
     ]
 
     print(f"\n  Total scanned:    {len(results)}")
-    print(f"  Reachable:        {n_reachable}  ({n_reachable / len(results) * 100:.1f}%)")
+    print(
+        f"  Reachable:        {n_reachable}  ({n_reachable / len(results) * 100:.1f}%)"
+    )
     print(f"  Jaws level:       {n_level}  ({n_level / len(results) * 100:.1f}%)")
     print(f"  Reach + level:    {n_reach_and_level}")
     print(f"  Grasp-feasible (gap > {cube_size}m): {len(feasible)}")
-
-    # Per-Z-slice stats
-    z_slices = {}
-    for z_val in np.sort(zs):
-        z_key = round(float(z_val), 4)
-        pts = [r for r in results if r["z"] == z_key]
-        n_pts = len(pts)
-        if n_pts == 0:
-            continue
-        n_r = sum(1 for p in pts if p["reachable"])
-        n_l = sum(1 for p in pts if p["jaws_level"])
-        n_rl = sum(1 for p in pts if p["reachable"] and p["jaws_level"])
-        n_f = sum(1 for p in pts if p["reachable"] and p["jaws_level"] and p["jaw_gap"] > cube_size)
-        gaps = [p["jaw_gap"] for p in pts if p["reachable"] and p["jaws_level"]]
-        z_slices[z_key] = {
-            "n_points": n_pts,
-            "reachable": n_r,
-            "jaws_level": n_l,
-            "reach_and_level": n_rl,
-            "feasible": n_f,
-            "feasible_pct": round(n_f / n_pts * 100, 1),
-            "jaw_gap_min": round(min(gaps), 5) if gaps else None,
-            "jaw_gap_max": round(max(gaps), 5) if gaps else None,
-            "jaw_gap_mean": round(float(np.mean(gaps)), 5) if gaps else None,
-        }
 
     # Feasible zone bounds + recommended cube center
     feasible_zone = None
@@ -456,27 +446,25 @@ def main() -> None:
     if feasible:
         f_xs = [r["x"] for r in feasible]
         f_ys = [r["y"] for r in feasible]
-        f_zs = [r["z"] for r in feasible]
         feasible_zone = {
             "x_min": round(min(f_xs), 4),
             "x_max": round(max(f_xs), 4),
             "y_min": round(min(f_ys), 4),
             "y_max": round(max(f_ys), 4),
-            "z_min": round(min(f_zs), 4),
-            "z_max": round(max(f_zs), 4),
         }
         recommended_cube_center = [
             round(float(np.mean(f_xs)), 4),
             round(float(np.mean(f_ys)), 4),
-            round(float(np.mean(f_zs)), 4),
+            round(grasp_z, 4),
         ]
-        print(f"\n  Feasible zone:")
+        print(f"\n  Feasible zone (XY at z={grasp_z:.4f}):")
         print(f"    X: [{feasible_zone['x_min']:.3f}, {feasible_zone['x_max']:.3f}]")
         print(f"    Y: [{feasible_zone['y_min']:.3f}, {feasible_zone['y_max']:.3f}]")
-        print(f"    Z: [{feasible_zone['z_min']:.4f}, {feasible_zone['z_max']:.4f}]")
         print(f"\n  Recommended cube center: {recommended_cube_center}")
     else:
-        print(f"\n  *** NO feasible points for cube_size={cube_size}m ***")
+        print(
+            f"\n  *** NO feasible points for cube_size={cube_size}m at z={grasp_z:.4f} ***"
+        )
 
     # -----------------------------------------------------------------------
     # Save
@@ -489,9 +477,8 @@ def main() -> None:
         "grid": {
             "x": [round(float(v), 4) for v in xs.tolist()],
             "y": [round(float(v), 4) for v in ys.tolist()],
-            "z": [round(float(v), 4) for v in np.sort(zs).tolist()],
+            "grasp_z": round(grasp_z, 4),
             "total_points": len(results),
-            "n_columns": n_columns,
         },
         "cube_size": cube_size,
         "thresholds": {
@@ -515,7 +502,6 @@ def main() -> None:
         },
         "feasible_zone": feasible_zone,
         "recommended_cube_center": recommended_cube_center,
-        "z_slices": z_slices,
         "grid_points": results,
     }
 

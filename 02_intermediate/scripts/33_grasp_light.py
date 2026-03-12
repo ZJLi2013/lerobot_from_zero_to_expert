@@ -199,7 +199,7 @@ def lerp(a, b, n):
 HOME_DEG = np.array([0.0, -30.0, 90.0, -60.0, 0.0, 0.0], dtype=np.float32)
 KP = np.array([500.0, 500.0, 400.0, 400.0, 300.0, 200.0], dtype=np.float32)
 KV = np.array([50.0, 50.0, 40.0, 40.0, 30.0, 20.0], dtype=np.float32)
-CUBE_SIZE = (0.03, 0.03, 0.08)
+CUBE_SIZE = (0.03, 0.03, 0.03)
 QUAT_START_WP = 2
 LEVEL_TOLERANCE = 0.004
 LEVEL_HOLD_STEPS = 8
@@ -247,9 +247,10 @@ def main() -> None:
     ap.add_argument("--settle-steps", type=int, default=30)
     ap.add_argument("--cube-x", type=float, default=0.16)
     ap.add_argument("--cube-y", type=float, default=0.0)
-    ap.add_argument("--cube-z", type=float, default=0.04)
+    ap.add_argument("--cube-z", type=float, default=None,
+                    help="Cube center Z (m). Default: cube_size_z/2 (resting on ground plane)")
     ap.add_argument("--cube-friction", type=float, default=1.5)
-    ap.add_argument("--gripper-open", type=float, default=20.0)
+    ap.add_argument("--gripper-open", type=float, default=25.0)
     ap.add_argument("--gripper-close", type=float, default=2.0)
     ap.add_argument("--grasp-offset-x", type=float, default=0.0)
     ap.add_argument("--grasp-offset-y", type=float, default=0.0)
@@ -272,6 +273,9 @@ def main() -> None:
         help="Include full dz_jaw_trace in summary (default: only tail).",
     )
     args = ap.parse_args()
+
+    if args.cube_z is None:
+        args.cube_z = CUBE_SIZE[2] / 2.0
 
     xml = find_so101_xml(args.xml)
     if xml is None:
@@ -306,7 +310,11 @@ def main() -> None:
         GUI=False,
     )
     # Side camera: keep axis-aligned view but move farther so full arm fits in FOV.
-    side_pos = (float(args.cube_x), float(args.cube_y - 0.32), float(args.cube_z + 0.09))
+    side_pos = (
+        float(args.cube_x),
+        float(args.cube_y - 0.32),
+        float(args.cube_z + 0.09),
+    )
     side_lookat = (float(args.cube_x), float(args.cube_y), float(args.cube_z + 0.03))
     cam_side = scene.add_camera(
         res=(640, 480), pos=side_pos, lookat=side_lookat, fov=50, GUI=False
@@ -344,13 +352,19 @@ def main() -> None:
         for _ in range(args.settle_steps):
             scene.step()
 
-    def solve_ik_seeded(pos, grip_deg, seed_rad, quat_target=None, local_point=None, rot_mask=None):
+    def solve_ik_seeded(
+        pos, grip_deg, seed_rad, quat_target=None, local_point=None, rot_mask=None
+    ):
         kwargs = dict(
             link=ee,
             pos=np.array(pos, dtype=np.float32),
             quat=quat_target,
             init_qpos=seed_rad,
-            local_point=np.array(local_point, dtype=np.float32) if local_point is not None else None,
+            local_point=(
+                np.array(local_point, dtype=np.float32)
+                if local_point is not None
+                else None
+            ),
             max_solver_iters=50,
             damping=0.02,
         )
@@ -397,7 +411,9 @@ def main() -> None:
         fixed_to_moving = moving_box["center_world"] - fixed_box["center_world"]
         moving_to_fixed = fixed_box["center_world"] - moving_box["center_world"]
         fixed_inward = fixed_axis * np.sign(np.dot(fixed_to_moving, fixed_axis) or 1.0)
-        moving_inward = moving_axis * np.sign(np.dot(moving_to_fixed, moving_axis) or 1.0)
+        moving_inward = moving_axis * np.sign(
+            np.dot(moving_to_fixed, moving_axis) or 1.0
+        )
         fixed_inner_surface = (
             fixed_box["center_world"] + fixed_inward * fixed_box["half_thickness"]
         )
@@ -494,9 +510,16 @@ def main() -> None:
     descent_wps = []
     descent_wp_phases = []
     replan_wps = []
-    pre_close_target = cube_init + off + np.array([0.0, 0.0, args.approach_z], dtype=np.float64)
-    mid_pregrasp = np.array([cube_init[0] + off[0], cube_init[1] + off[1], cube_top_z + REPLAN_CLEARANCE], dtype=np.float64)
-    mid_grasp = np.array([cube_init[0] + off[0], cube_init[1] + off[1], cube_init[2]], dtype=np.float64)
+    pre_close_target = (
+        cube_init + off + np.array([0.0, 0.0, args.approach_z], dtype=np.float64)
+    )
+    mid_pregrasp = np.array(
+        [cube_init[0] + off[0], cube_init[1] + off[1], cube_top_z + REPLAN_CLEARANCE],
+        dtype=np.float64,
+    )
+    mid_grasp = np.array(
+        [cube_init[0] + off[0], cube_init[1] + off[1], cube_init[2]], dtype=np.float64
+    )
     recovery_success_count = 0
     recovery_fail_count = 0
     recovery_events = []
@@ -529,10 +552,10 @@ def main() -> None:
                 if quat_ref is not None:
                     for step in range(1, LEVEL_RECOVERY_MAX_ROLL_STEPS + 1):
                         for sign in (1.0, -1.0):
-                            roll_delta = float(sign * step * LEVEL_RECOVERY_ROLL_STEP_RAD)
-                            q_try = quat_multiply(
-                                quat_from_roll(roll_delta), quat_ref
+                            roll_delta = float(
+                                sign * step * LEVEL_RECOVERY_ROLL_STEP_RAD
                             )
+                            q_try = quat_multiply(quat_from_roll(roll_delta), quat_ref)
                             wp_try = solve_ik_seeded(
                                 pos,
                                 args.gripper_open,
@@ -566,7 +589,8 @@ def main() -> None:
                     for step in range(1, LEVEL_RECOVERY_FINE_ROLL_STEPS + 1):
                         for sign in (1.0, -1.0):
                             roll_delta_f = float(
-                                base_delta + sign * step * LEVEL_RECOVERY_FINE_ROLL_STEP_RAD
+                                base_delta
+                                + sign * step * LEVEL_RECOVERY_FINE_ROLL_STEP_RAD
                             )
                             q_try_f = quat_multiply(
                                 quat_from_roll(roll_delta_f), quat_ref
@@ -579,9 +603,8 @@ def main() -> None:
                                 local_point=mid_local_pt_init,
                             )
                             dz_try_f = measure_dz_for_qdeg(wp_try_f)
-                            if (
-                                abs(dz_try_f) <= LEVEL_TOLERANCE
-                                and abs(dz_try_f) < abs(best_feasible["dz"])
+                            if abs(dz_try_f) <= LEVEL_TOLERANCE and abs(dz_try_f) < abs(
+                                best_feasible["dz"]
                             ):
                                 best_feasible = {
                                     "wp": wp_try_f,
@@ -598,7 +621,9 @@ def main() -> None:
                             "wp_idx": int(i),
                             "recovered": True,
                             "dz_after": float(dz_wp),
-                            "roll_delta_deg": float(np.degrees(best_feasible["roll_delta_rad"])),
+                            "roll_delta_deg": float(
+                                np.degrees(best_feasible["roll_delta_rad"])
+                            ),
                         }
                     )
                     # Leveling succeeded — replan: pregrasp (above cube) → grasp (cube center).
@@ -611,7 +636,9 @@ def main() -> None:
                         scene.step()
                     mid_local_pt = compute_mid_local_point()
                     jaw_at_level = measure_jaw_dz()
-                    mid_leveled = np.array(jaw_at_level["mid_inner_surface"], dtype=np.float64)
+                    mid_leveled = np.array(
+                        jaw_at_level["mid_inner_surface"], dtype=np.float64
+                    )
                     replan_prev_rad = replan_seed.copy()
                     replan_step_details = []
                     # Step 0: move to mid_pregrasp (above cube, XY aligned).
@@ -624,19 +651,25 @@ def main() -> None:
                         rot_mask=[False, False, True],
                     )
                     replan_wps.append(wp_pregrasp)
-                    replan_prev_rad = np.deg2rad(np.array(wp_pregrasp, dtype=np.float32))
+                    replan_prev_rad = np.deg2rad(
+                        np.array(wp_pregrasp, dtype=np.float32)
+                    )
                     so101.set_qpos(replan_prev_rad)
                     so101.control_dofs_position(replan_prev_rad, dof_idx)
                     for _ in range(2):
                         scene.step()
-                    rp_mid_actual = np.array(measure_jaw_dz()["mid_inner_surface"], dtype=np.float64)
+                    rp_mid_actual = np.array(
+                        measure_jaw_dz()["mid_inner_surface"], dtype=np.float64
+                    )
                     replan_step_details.append(
                         {
                             "step": 0,
                             "phase": "pregrasp",
                             "desired_mid": [float(v) for v in mid_pregrasp.tolist()],
                             "mid_actual": [float(v) for v in rp_mid_actual.tolist()],
-                            "mid_error_to_desired": float(np.linalg.norm(rp_mid_actual - mid_pregrasp)),
+                            "mid_error_to_desired": float(
+                                np.linalg.norm(rp_mid_actual - mid_pregrasp)
+                            ),
                         }
                     )
                     # Steps 1..N: descend from mid_pregrasp → mid_grasp.
@@ -657,16 +690,24 @@ def main() -> None:
                         so101.control_dofs_position(replan_prev_rad, dof_idx)
                         for _ in range(2):
                             scene.step()
-                        rp_mid_actual = np.array(measure_jaw_dz()["mid_inner_surface"], dtype=np.float64)
+                        rp_mid_actual = np.array(
+                            measure_jaw_dz()["mid_inner_surface"], dtype=np.float64
+                        )
                         replan_step_details.append(
                             {
                                 "step": int(ri + 1),
                                 "phase": "descent",
                                 "alpha": float(alpha),
                                 "desired_mid": [float(v) for v in desired_mid.tolist()],
-                                "mid_actual": [float(v) for v in rp_mid_actual.tolist()],
-                                "mid_error_to_desired": float(np.linalg.norm(rp_mid_actual - desired_mid)),
-                                "mid_error_to_grasp": float(np.linalg.norm(rp_mid_actual - mid_grasp)),
+                                "mid_actual": [
+                                    float(v) for v in rp_mid_actual.tolist()
+                                ],
+                                "mid_error_to_desired": float(
+                                    np.linalg.norm(rp_mid_actual - desired_mid)
+                                ),
+                                "mid_error_to_grasp": float(
+                                    np.linalg.norm(rp_mid_actual - mid_grasp)
+                                ),
                             }
                         )
                     replan_eval = evaluate_qdeg_against_target(
@@ -677,13 +718,17 @@ def main() -> None:
                             "trigger_wp_idx": int(i),
                             "leveled_dz": float(dz_wp),
                             "n_replan_wps": int(N_REPLAN_WPS),
-                            "mid_local_point": [float(v) for v in mid_local_pt.tolist()],
+                            "mid_local_point": [
+                                float(v) for v in mid_local_pt.tolist()
+                            ],
                             "mid_pregrasp": [float(v) for v in mid_pregrasp.tolist()],
                             "mid_grasp": [float(v) for v in mid_grasp.tolist()],
                             "dz_abs": float(abs(replan_eval["dz_inner_surface"])),
                             "gc_pos_error": float(replan_eval["gc_pos_error"]),
                             "gc_xy_drift": float(replan_eval["gc_xy_drift"]),
-                            "mid_surface_xy_drift": float(replan_eval["mid_surface_xy_drift"]),
+                            "mid_surface_xy_drift": float(
+                                replan_eval["mid_surface_xy_drift"]
+                            ),
                             "step_details": replan_step_details,
                         }
                     )
@@ -698,7 +743,9 @@ def main() -> None:
                             "recovered": False,
                             "dz_before": float(dz_wp),
                             "best_dz": float(best["dz"]),
-                            "best_roll_delta_deg": float(np.degrees(best["roll_delta_rad"])),
+                            "best_roll_delta_deg": float(
+                                np.degrees(best["roll_delta_rad"])
+                            ),
                         }
                     )
                     wp = best["wp"]
@@ -734,11 +781,21 @@ def main() -> None:
                 "mid_surface_pos_error": float(pre_close_eval["mid_surface_pos_error"]),
                 "mid_surface_xy_drift": float(pre_close_eval["mid_surface_xy_drift"]),
                 "dz_inner_surface": float(pre_close_eval["dz_inner_surface"]),
-                "mid_surface_to_cube_top": float(pre_close_eval["mid_surface_to_cube_top"]),
-                "jaw_parallel_ok": bool(abs(pre_close_eval["dz_inner_surface"]) <= LEVEL_TOLERANCE),
-                "grasp_center_error_ok": bool(pre_close_eval["gc_pos_error"] <= PRE_CLOSE_POS_TOL),
-                "mid_surface_xy_ok": bool(pre_close_eval["mid_surface_xy_drift"] <= PRE_CLOSE_MID_XY_TOL),
-                "mid_surface_height_ok": bool(pre_close_eval["mid_surface_to_cube_top"] <= PRE_CLOSE_MAX_ABOVE_TOP),
+                "mid_surface_to_cube_top": float(
+                    pre_close_eval["mid_surface_to_cube_top"]
+                ),
+                "jaw_parallel_ok": bool(
+                    abs(pre_close_eval["dz_inner_surface"]) <= LEVEL_TOLERANCE
+                ),
+                "grasp_center_error_ok": bool(
+                    pre_close_eval["gc_pos_error"] <= PRE_CLOSE_POS_TOL
+                ),
+                "mid_surface_xy_ok": bool(
+                    pre_close_eval["mid_surface_xy_drift"] <= PRE_CLOSE_MID_XY_TOL
+                ),
+                "mid_surface_height_ok": bool(
+                    pre_close_eval["mid_surface_to_cube_top"] <= PRE_CLOSE_MAX_ABOVE_TOP
+                ),
             }
         )
         pre_close_replan["pre_close_gate_pass"] = bool(
@@ -824,8 +881,12 @@ def main() -> None:
         }
     )
     frame_buffer = []
-    keep_approach = [i for i, p in enumerate(phases) if p in {"approach", "tune_roll", "approach_replan"}]
-    keep_approach_tail = set(keep_approach[-EXPORT_APPROACH_TAIL :])
+    keep_approach = [
+        i
+        for i, p in enumerate(phases)
+        if p in {"approach", "tune_roll", "approach_replan"}
+    ]
+    keep_approach_tail = set(keep_approach[-EXPORT_APPROACH_TAIL:])
     if args.quat_mode == "pregrasp_flatten_yaw":
         # For gate-leveling runs, keep full pre_grasp_level + approach + close/hold/lift.
         keep_level = {i for i, p in enumerate(phases) if p == "pre_grasp_level"}
@@ -872,7 +933,9 @@ def main() -> None:
     cube_pos_final = to_numpy(cube.get_pos())
     cube_shift = cube_pos_final - cube_init
     phase_dz = phase_stats(dz_rows)
-    approach_rows = [r for r in dz_rows if r["phase"] in {"approach", "tune_roll", "approach_replan"}]
+    approach_rows = [
+        r for r in dz_rows if r["phase"] in {"approach", "tune_roll", "approach_replan"}
+    ]
     move_rows = [r for r in dz_rows if r["phase"] == "move_pre"]
     dz_analysis = {}
     if move_rows and approach_rows:
@@ -892,7 +955,10 @@ def main() -> None:
             "delta_approach": float(app_end - app_start),
             "approach_slope_per_step": slope,
             # simple heuristic: |delta_approach| > 1 mm and trend sign matches
-            "approach_accumulates": bool(abs(app_end - app_start) > 1e-3 and np.sign(app_end - app_start) == np.sign(slope)),
+            "approach_accumulates": bool(
+                abs(app_end - app_start) > 1e-3
+                and np.sign(app_end - app_start) == np.sign(slope)
+            ),
         }
     level_recovery_summary = {
         "roll_step_deg": float(np.degrees(LEVEL_RECOVERY_ROLL_STEP_RAD)),
