@@ -241,11 +241,6 @@ def main() -> None:
     ap.add_argument("--fps", type=int, default=30)
     ap.add_argument("--sim-substeps", type=int, default=4)
     ap.add_argument("--sim-dt", type=float, default=None)
-    ap.add_argument(
-        "--use-gjk-collision",
-        action="store_true",
-        help="Enable GJK collision backend for contact robustness diagnostics.",
-    )
     ap.add_argument("--trial-steps", type=int, default=90)
     ap.add_argument("--approach-hold-steps", type=int, default=1)
     ap.add_argument("--close-hold-steps", type=int, default=12)
@@ -295,14 +290,11 @@ def main() -> None:
 
     gs.init(backend=(gs.cpu if args.cpu else gs.gpu), logging_level="warning")
     sim_dt = args.sim_dt if args.sim_dt is not None else 1.0 / args.fps
-    rigid_kw = dict(
-        enable_collision=True, enable_joint_limit=True, box_box_detection=True
-    )
-    if args.use_gjk_collision:
-        rigid_kw["use_gjk_collision"] = True
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(dt=sim_dt, substeps=args.sim_substeps),
-        rigid_options=gs.options.RigidOptions(**rigid_kw),
+        rigid_options=gs.options.RigidOptions(
+            enable_collision=True, enable_joint_limit=True, box_box_detection=True
+        ),
         show_viewer=False,
     )
     scene.add_entity(gs.morphs.Plane())
