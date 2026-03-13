@@ -1,8 +1,7 @@
 """
 Minimal top-down grasp: reset -> descend -> close -> lift.
 
-Position-only IK with local_point (jaw midpoint), no quat constraints,
-no tune-roll, no replan. Designed as the simplest feasible baseline
+Position-only IK with local_point (jaw midpoint). Designed as the simplest feasible baseline
 based on workspace mapper v4 analysis.
 """
 
@@ -22,6 +21,7 @@ import numpy as np
 # ---------------------------------------------------------------------------
 # Utilities (shared with 33/35 scripts)
 # ---------------------------------------------------------------------------
+
 
 def ensure_display() -> None:
     if os.environ.get("DISPLAY"):
@@ -63,11 +63,14 @@ def transform_point(link_pos, link_quat, local_pos):
 
 def quat_to_rotmat(q):
     w, x, y, z = q
-    return np.array([
-        [1 - 2*(y*y + z*z), 2*(x*y - z*w),     2*(x*z + y*w)],
-        [2*(x*y + z*w),     1 - 2*(x*x + z*z), 2*(y*z - x*w)],
-        [2*(x*z - y*w),     2*(y*z + x*w),     1 - 2*(x*x + y*y)],
-    ], dtype=np.float64)
+    return np.array(
+        [
+            [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+            [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+            [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+        ],
+        dtype=np.float64,
+    )
 
 
 def render_camera(cam):
@@ -81,17 +84,28 @@ def render_camera(cam):
 def save_rgb_png(arr, path: Path) -> None:
     try:
         from PIL import Image
+
         Image.fromarray(arr).save(path)
     except ImportError:
         import imageio.v2 as imageio
+
         imageio.imwrite(path, arr)
 
 
 def box_tilt_deg(cube_quat) -> float:
     r = quat_to_rotmat(cube_quat)
     z_axis = r @ np.array([0.0, 0.0, 1.0])
-    cosv = abs(float(np.clip(np.dot(z_axis / (np.linalg.norm(z_axis) + 1e-9),
-                                     np.array([0.0, 0.0, 1.0])), -1, 1)))
+    cosv = abs(
+        float(
+            np.clip(
+                np.dot(
+                    z_axis / (np.linalg.norm(z_axis) + 1e-9), np.array([0.0, 0.0, 1.0])
+                ),
+                -1,
+                1,
+            )
+        )
+    )
     return float(np.degrees(np.arccos(cosv)))
 
 
@@ -154,14 +168,15 @@ KP = np.array([500.0, 500.0, 400.0, 400.0, 300.0, 200.0], dtype=np.float32)
 KV = np.array([50.0, 50.0, 40.0, 40.0, 30.0, 20.0], dtype=np.float32)
 CUBE_SIZE = (0.03, 0.03, 0.03)
 N_DESCENT = 10
-N_CLOSE = 8
-N_LIFT = 6
+N_CLOSE = 3
+N_LIFT = 4
 PRE_HEIGHT = 0.15
 
 
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
 
 def main() -> None:
     ensure_display()
@@ -177,14 +192,22 @@ def main() -> None:
     ap.add_argument("--close-hold-steps", type=int, default=12)
     ap.add_argument("--cube-x", type=float, default=0.15)
     ap.add_argument("--cube-y", type=float, default=-0.06)
-    ap.add_argument("--cube-z", type=float, default=None,
-                    help="Cube center Z. Default: CUBE_SIZE[2]/2 (ground plane)")
+    ap.add_argument(
+        "--cube-z",
+        type=float,
+        default=None,
+        help="Cube center Z. Default: CUBE_SIZE[2]/2 (ground plane)",
+    )
     ap.add_argument("--cube-friction", type=float, default=1.5)
     ap.add_argument("--gripper-open", type=float, default=25.0)
     ap.add_argument("--gripper-close", type=float, default=2.0)
     ap.add_argument("--grasp-offset-z", type=float, default=0.0)
-    ap.add_argument("--approach-z", type=float, default=0.012,
-                    help="Height above cube center for pre-close target")
+    ap.add_argument(
+        "--approach-z",
+        type=float,
+        default=0.012,
+        help="Height above cube center for pre-close target",
+    )
     ap.add_argument("--export-last-frames", type=int, default=10)
     args = ap.parse_args()
 
@@ -203,32 +226,41 @@ def main() -> None:
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(dt=sim_dt, substeps=args.sim_substeps),
         rigid_options=gs.options.RigidOptions(
-            enable_collision=True, enable_joint_limit=True, box_box_detection=True,
+            enable_collision=True,
+            enable_joint_limit=True,
+            box_box_detection=True,
         ),
         show_viewer=False,
     )
     scene.add_entity(gs.morphs.Plane())
     cube = scene.add_entity(
-        morph=gs.morphs.Box(size=CUBE_SIZE, pos=(args.cube_x, args.cube_y, args.cube_z)),
+        morph=gs.morphs.Box(
+            size=CUBE_SIZE, pos=(args.cube_x, args.cube_y, args.cube_z)
+        ),
         material=gs.materials.Rigid(friction=args.cube_friction),
         surface=gs.surfaces.Default(color=(1.0, 0.3, 0.3, 1.0)),
     )
     so101 = scene.add_entity(gs.morphs.MJCF(file=str(xml), pos=(0.0, 0.0, 0.0)))
     cam_top = scene.add_camera(
-        res=(640, 480), pos=(0.42, 0.34, 0.26), lookat=(0.15, 0.0, 0.08), fov=38, GUI=False,
+        res=(640, 480),
+        pos=(0.42, 0.34, 0.26),
+        lookat=(0.15, 0.0, 0.08),
+        fov=38,
+        GUI=False,
     )
     cam_side = scene.add_camera(
         res=(640, 480),
         pos=(float(args.cube_x), float(args.cube_y - 0.32), float(args.cube_z + 0.09)),
         lookat=(float(args.cube_x), float(args.cube_y), float(args.cube_z + 0.03)),
-        fov=50, GUI=False,
+        fov=50,
+        GUI=False,
     )
     scene.build()
 
     dof_idx = np.arange(so101.n_dofs)
-    so101.set_dofs_kp(KP[:so101.n_dofs], dof_idx)
-    so101.set_dofs_kv(KV[:so101.n_dofs], dof_idx)
-    home_deg = HOME_DEG[:so101.n_dofs]
+    so101.set_dofs_kp(KP[: so101.n_dofs], dof_idx)
+    so101.set_dofs_kv(KV[: so101.n_dofs], dof_idx)
+    home_deg = HOME_DEG[: so101.n_dofs]
     home_rad = np.deg2rad(home_deg)
 
     ee = so101.get_link("grasp_center")
@@ -243,8 +275,14 @@ def main() -> None:
         so101.set_qpos(home_rad)
         so101.control_dofs_position(home_rad, dof_idx)
         so101.zero_all_dofs_velocity()
-        cube.set_pos(torch.tensor(cube_init, dtype=torch.float32, device=gs.device).unsqueeze(0))
-        cube.set_quat(torch.tensor([1, 0, 0, 0], dtype=torch.float32, device=gs.device).unsqueeze(0))
+        cube.set_pos(
+            torch.tensor(cube_init, dtype=torch.float32, device=gs.device).unsqueeze(0)
+        )
+        cube.set_quat(
+            torch.tensor([1, 0, 0, 0], dtype=torch.float32, device=gs.device).unsqueeze(
+                0
+            )
+        )
         cube.zero_all_dofs_velocity()
         for _ in range(args.settle_steps):
             scene.step()
@@ -271,8 +309,13 @@ def main() -> None:
         lq = to_numpy(link.get_quat())
         cw = transform_point(lp, lq, cfg["pos"])
         rot = quat_to_rotmat(lq)
-        ta = np.zeros(3); ta[int(np.argmin(cfg["size"]))] = 1.0
-        return {"center": cw, "axis": normalize(rot @ ta), "half_t": float(np.min(cfg["size"]))}
+        ta = np.zeros(3)
+        ta[int(np.argmin(cfg["size"]))] = 1.0
+        return {
+            "center": cw,
+            "axis": normalize(rot @ ta),
+            "half_t": float(np.min(cfg["size"])),
+        }
 
     def measure_jaw():
         fb = get_jaw_box_world(fixed_jaw, jaw_box_cfg["fixed_jaw_box"])
@@ -307,10 +350,14 @@ def main() -> None:
     for _ in range(10):
         scene.step()
     mid_local = compute_mid_local_point()
-    print(f"[init] mid_local_point = [{mid_local[0]:.6f}, {mid_local[1]:.6f}, {mid_local[2]:.6f}]")
+    print(
+        f"[init] mid_local_point = [{mid_local[0]:.6f}, {mid_local[1]:.6f}, {mid_local[2]:.6f}]"
+    )
 
     # ----- build trajectory -----
-    grasp_target = cube_init + np.array([0.0, 0.0, args.grasp_offset_z + args.approach_z])
+    grasp_target = cube_init + np.array(
+        [0.0, 0.0, args.grasp_offset_z + args.approach_z]
+    )
     pre_pos = cube_init + np.array([0.0, 0.0, PRE_HEIGHT])
     lift_pos = cube_init + np.array([0.0, 0.0, PRE_HEIGHT])
 
@@ -342,7 +389,9 @@ def main() -> None:
     lift_wps = []
     for i in range(N_LIFT):
         frac = (i + 1) / N_LIFT
-        z = (args.grasp_offset_z + args.approach_z) + (PRE_HEIGHT - args.grasp_offset_z - args.approach_z) * frac
+        z = (args.grasp_offset_z + args.approach_z) + (
+            PRE_HEIGHT - args.grasp_offset_z - args.approach_z
+        ) * frac
         pos = cube_init + np.array([0.0, 0.0, z])
         wp = solve_ik(pos, args.gripper_close, seed, local_point=mid_local)
         seed = np.deg2rad(np.array(wp, dtype=np.float32))
@@ -387,8 +436,6 @@ def main() -> None:
     png_dir = out_root / "pngs"
     png_dir.mkdir(parents=True, exist_ok=True)
 
-    keep_frames = set(range(len(traj) - args.export_last_frames, len(traj)))
-    keep_frames |= {0, len(traj) // 4, len(traj) // 2, 3 * len(traj) // 4}
     frame_buffer = []
 
     for i, q_deg in enumerate(traj):
@@ -396,11 +443,15 @@ def main() -> None:
             np.deg2rad(np.array(q_deg, dtype=np.float32)), dof_idx
         )
         scene.step()
-        if i in keep_frames:
-            frame_buffer.append((
-                i, phases[i],
-                np.concatenate([render_camera(cam_top), render_camera(cam_side)], axis=1),
-            ))
+        frame_buffer.append(
+            (
+                i,
+                phases[i],
+                np.concatenate(
+                    [render_camera(cam_top), render_camera(cam_side)], axis=1
+                ),
+            )
+        )
 
     for i, phase, img in frame_buffer:
         save_rgb_png(img, png_dir / f"f{i:03d}_{phase}.png")
