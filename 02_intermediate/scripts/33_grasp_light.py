@@ -851,12 +851,12 @@ def main() -> None:
             prev = wp
     traj += [q_approach.copy() for _ in range(args.approach_hold_steps)]
     phases += ["approach_hold"] * args.approach_hold_steps
-    n_close = max(8, args.trial_steps // 12)
+    n_close = max(3, args.trial_steps // 20)
     traj += lerp(q_approach, q_close, n_close)
     phases += ["close"] * n_close
     traj += [q_close.copy() for _ in range(args.close_hold_steps)]
     phases += ["close_hold"] * args.close_hold_steps
-    steps_per_lift = max(5, args.trial_steps // (8 * n_lift_wps))
+    steps_per_lift = max(3, args.trial_steps // (10 * n_lift_wps))
     prev = q_close
     for wp in lift_wps:
         seg = lerp(prev, wp, steps_per_lift)
@@ -881,25 +881,11 @@ def main() -> None:
         }
     )
     frame_buffer = []
-    keep_approach = [
-        i
-        for i, p in enumerate(phases)
-        if p in {"approach", "tune_roll", "approach_replan"}
-    ]
-    keep_approach_tail = set(keep_approach[-EXPORT_APPROACH_TAIL:])
-    if args.quat_mode == "pregrasp_flatten_yaw":
-        # For gate-leveling runs, keep full pre_grasp_level + approach + close/hold/lift.
-        keep_level = {i for i, p in enumerate(phases) if p == "pre_grasp_level"}
-        keep_approach_full = set(keep_approach)
-        keep_close_and_lift = {
-            i
-            for i, p in enumerate(phases)
-            if p in {"approach_hold", "close", "close_hold", "lift"}
-        }
-        keep = keep_level | keep_approach_full | keep_close_and_lift
-    else:
-        # Baseline run: only keep the final approach tail.
-        keep = keep_approach_tail
+    keep = {
+        i for i, p in enumerate(phases)
+        if p in {"approach", "tune_roll", "approach_replan",
+                 "approach_hold", "close", "close_hold", "lift"}
+    }
     for i, q_deg in enumerate(traj):
         so101.control_dofs_position(
             np.deg2rad(np.array(q_deg, dtype=np.float32)), dof_idx
