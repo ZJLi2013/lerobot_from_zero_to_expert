@@ -155,6 +155,7 @@ N_CLOSE = 4
 N_LIFT_WPS = 4
 PRE_HEIGHT = 0.15
 WRIST_ROLL_IDX = 4
+SNAP_BUFFER_STEPS = 4
 
 
 # ---------------------------------------------------------------------------
@@ -313,50 +314,84 @@ def main() -> None:
     mid_local = compute_mid_local_point()
     print(f"[init] mid_local_point = [{mid_local[0]:.6f}, {mid_local[1]:.6f}, {mid_local[2]:.6f}]")
 
-    # ----- descent waypoints (position-only IK + seed chain) -----
+    # ----- descent waypoints (position-only IK + seed chain + adaptive yaw snap) -----
     grasp_target_z = args.cube_z + args.grasp_offset_z + args.approach_z
+    cube_top_z = args.cube_z + CUBE_SIZE[2] / 2.0
     pre_pos = cube_init + np.array([0.0, 0.0, PRE_HEIGHT])
 
     q_pre = solve_ik(pre_pos, args.gripper_open, home_rad, local_point=mid_local)
     seed = np.deg2rad(np.array(q_pre, dtype=np.float32))
 
+    wrist_roll_lo = float(np.degrees(wrist_roll_range_rad[0]))
+    wrist_roll_hi = float(np.degrees(wrist_roll_range_rad[1]))
+
+    descent_z_step = abs(PRE_HEIGHT - grasp_target_z) / N_DESCENT
+    snap_trigger = descent_z_step * SNAP_BUFFER_STEPS
+    snap_started = False
+    snap_start_wp = -1
+    yaw_delta_total_deg = 0.0
+    wrist_roll_before_snap = 0.0
+    wrist_roll_target = 0.0
+    yaw_snap_info = {}
+
     descent_wps = []
+    descent_phases = []
     for i in range(N_DESCENT):
         frac = (i + 1) / N_DESCENT
         z = PRE_HEIGHT + (grasp_target_z - PRE_HEIGHT) * frac
         pos = cube_init + np.array([0.0, 0.0, z - args.cube_z])
         wp = solve_ik(pos, args.gripper_open, seed, local_point=mid_local)
+
+        jaw_now = settle_and_measure(wp, steps=3)
+        buffer_z = jaw_now["mid"][2] - cube_top_z
+
+        if not snap_started and buffer_z < snap_trigger:
+            snap_started = True
+            snap_start_wp = i
+            closing_xy = jaw_now["closing_axis"][:2]
+            yaw_current = float(np.arctan2(closing_xy[1], closing_xy[0]))
+            yaw_target = round(yaw_current / (np.pi / 2)) * (np.pi / 2)
+            yaw_delta_total_deg = float(np.degrees(yaw_target - yaw_current))
+            wrist_roll_before_snap = float(wp[WRIST_ROLL_IDX])
+            wrist_roll_target = float(np.clip(
+                wrist_roll_before_snap + yaw_delta_total_deg,
+                wrist_roll_lo, wrist_roll_hi,
+            ))
+            remaining_wps = N_DESCENT - i
+            print(f"[yaw_snap] triggered at wp {i}, buffer_z={buffer_z*1000:.1f}mm, "
+                  f"yaw={np.degrees(yaw_current):.1f}° → {np.degrees(yaw_target):.1f}°, "
+                  f"delta={yaw_delta_total_deg:.1f}°, {remaining_wps} steps to blend")
+
+        if snap_started:
+            remaining_wps = N_DESCENT - snap_start_wp
+            progress = (i - snap_start_wp + 1) / remaining_wps
+            blended_roll = wrist_roll_before_snap + progress * (wrist_roll_target - wrist_roll_before_snap)
+            wp[WRIST_ROLL_IDX] = float(np.clip(blended_roll, wrist_roll_lo, wrist_roll_hi))
+            descent_phases.append("approach_snap")
+        else:
+            descent_phases.append("approach")
+
         seed = np.deg2rad(np.array(wp, dtype=np.float32))
         descent_wps.append(wp)
 
     q_approach = descent_wps[-1]
 
-    # ----- YAW SNAP: align jaw closing axis with cube faces -----
-    jaw_pre_snap = settle_and_measure(q_approach, steps=5)
-    closing_xy = jaw_pre_snap["closing_axis"][:2]
-    yaw_current = float(np.arctan2(closing_xy[1], closing_xy[0]))
-    yaw_target = round(yaw_current / (np.pi / 2)) * (np.pi / 2)
-    yaw_delta_deg = float(np.degrees(yaw_target - yaw_current))
-
-    q_snapped = q_approach.copy()
-    new_wrist_roll = q_snapped[WRIST_ROLL_IDX] + yaw_delta_deg
-    wrist_roll_lo = float(np.degrees(wrist_roll_range_rad[0]))
-    wrist_roll_hi = float(np.degrees(wrist_roll_range_rad[1]))
-    new_wrist_roll = float(np.clip(new_wrist_roll, wrist_roll_lo, wrist_roll_hi))
-    q_snapped[WRIST_ROLL_IDX] = new_wrist_roll
-
-    jaw_post_snap = settle_and_measure(q_snapped, steps=5)
-    closing_xy_post = jaw_post_snap["closing_axis"][:2]
-    yaw_after = float(np.degrees(np.arctan2(closing_xy_post[1], closing_xy_post[0])))
-
-    print(f"[yaw_snap] yaw before: {np.degrees(yaw_current):.1f} deg")
-    print(f"[yaw_snap] yaw target: {np.degrees(yaw_target):.1f} deg")
-    print(f"[yaw_snap] wrist_roll delta: {yaw_delta_deg:.1f} deg")
-    print(f"[yaw_snap] yaw after:  {yaw_after:.1f} deg")
-    print(f"[yaw_snap] jaw_gap:    {jaw_post_snap['jaw_gap']*1000:.1f} mm")
-    print(f"[yaw_snap] delta_z:    {jaw_post_snap['delta_z']*1000:.2f} mm")
-
-    q_approach = q_snapped
+    jaw_final_approach = settle_and_measure(q_approach, steps=5)
+    closing_xy_final = jaw_final_approach["closing_axis"][:2]
+    yaw_after = float(np.degrees(np.arctan2(closing_xy_final[1], closing_xy_final[0])))
+    yaw_snap_info = {
+        "triggered": snap_started,
+        "trigger_wp": snap_start_wp,
+        "snap_buffer_steps": SNAP_BUFFER_STEPS,
+        "snap_trigger_m": snap_trigger,
+        "yaw_delta_deg": yaw_delta_total_deg,
+        "yaw_after_deg": yaw_after,
+        "jaw_gap_after": jaw_final_approach["jaw_gap"],
+        "delta_z_after": jaw_final_approach["delta_z"],
+    }
+    print(f"[yaw_snap] after blend: yaw={yaw_after:.1f}°, "
+          f"gap={jaw_final_approach['jaw_gap']*1000:.1f}mm, "
+          f"delta_z={jaw_final_approach['delta_z']*1000:.2f}mm")
 
     # ----- close + lift -----
     q_close = q_approach.copy()
@@ -380,14 +415,12 @@ def main() -> None:
     phases += ["move_pre"] * steps_per_wp
 
     prev = q_pre
-    for wp in descent_wps[:-1]:
+    for wi, wp in enumerate(descent_wps):
         seg = lerp(prev, wp, steps_per_wp)
-        traj += seg; phases += ["descent"] * len(seg)
+        traj += seg; phases += [descent_phases[wi]] * len(seg)
         prev = wp
-    seg = lerp(prev, q_snapped, steps_per_wp)
-    traj += seg; phases += ["descent_snap"] * len(seg)
 
-    traj += [q_snapped] * 2
+    traj += [q_approach] * 2
     phases += ["approach_hold"] * 2
 
     traj += lerp(q_approach, q_close, N_CLOSE)
@@ -412,7 +445,7 @@ def main() -> None:
     png_dir.mkdir(parents=True, exist_ok=True)
 
     keep = {i for i, p in enumerate(phases)
-            if p in {"descent", "descent_snap", "approach_hold", "close", "close_hold", "lift"}}
+            if p in {"approach", "approach_snap", "approach_hold", "close", "close_hold", "lift"}}
     frame_buffer = []
 
     for i, q_deg in enumerate(traj):
@@ -452,14 +485,7 @@ def main() -> None:
         "cube_shift": cube_shift.tolist(),
         "lift_z_m": lift_z,
         "tilt_deg": tilt,
-        "yaw_snap": {
-            "yaw_before_deg": float(np.degrees(yaw_current)),
-            "yaw_target_deg": float(np.degrees(yaw_target)),
-            "wrist_roll_delta_deg": yaw_delta_deg,
-            "yaw_after_deg": yaw_after,
-            "jaw_gap_after": jaw_post_snap["jaw_gap"],
-            "delta_z_after": jaw_post_snap["delta_z"],
-        },
+        "yaw_snap": yaw_snap_info,
         "jaw_final": {
             "jaw_gap": jaw_final["jaw_gap"],
             "delta_z": jaw_final["delta_z"],

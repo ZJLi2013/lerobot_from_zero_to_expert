@@ -30,6 +30,7 @@ jaw plane 对齐 (yaw)	1	两爪平面与 cube 侧面平行
 **这不是"没搜到好参数"，而是搜索空间的结构本身不支持稳定解**
 
 
+## 重新设计
 
 **方案A:确定可行工作空间，再配置 cube**
 
@@ -39,61 +40,52 @@ jaw plane 对齐 (yaw)	1	两爪平面与 cube 侧面平行
 python 35_workspace_mapper.py --exp-id ws_v4_zsweep_go25 --save /output --gripper-open 25
 ```
 
-### v4 z-sweep 实测结果（4090, `genesis_poc:latest`, 2026-03-12）
+### v4 z-sweep 实测结果（4090, `genesis_poc:latest`, 2026-03-12~13）
 
-grid: X=19 (`0.08~0.26`), Y=21 (`-0.10~0.10`), Z=8 层 (`0.015~0.029`), 共 3192 pts
+grid: X=19 (`0.08~0.26`), Y=21 (`-0.10~0.10`), Z=8 层 (`0.015~0.029`), cube_size=0.03
 
-| grasp_z | reachable | jaws_level | feasible | feasible% |
-|---------|-----------|------------|----------|-----------|
-| 0.015 | 3 | 66 | 2 | 0.5% |
-| 0.017 | 15 | 65 | 10 | 2.5% |
-| 0.019 | 53 | 66 | 25 | 6.3% |
-| 0.021 | 94 | 65 | 41 | 10.3% |
-| 0.023 | 119 | 66 | 50 | 12.5% |
-| 0.025 | 142 | 69 | 53 | 13.3% |
-| **0.027** | **165** | **66** | **55** | **13.8%** |
-| 0.029 | 180 | 68 | 55 | 13.8% |
+#### gripper_open 对比（25 / 40 / 50 度）
 
-**关键发现**: 瓶颈是 reachable（3→180），不是 jaws_level（稳定 65~69）。
-z 每升高 2mm，可达性持续改善。最优 z=0.027，feasible zone: X=[0.09,0.21], Y=[-0.1,0.1]。
+| grasp_z | open=25 reach | level | feasible | open=40 reach | level | feasible | open=50 reach | level | feasible |
+|---------|------|-------|----------|------|-------|----------|------|-------|----------|
+| 0.015 | 3 | 66 | 2 | 5 | 34 | 0 | 2 | 19 | 0 |
+| 0.017 | 15 | 65 | 10 | 10 | 34 | 4 | 6 | 17 | 3 |
+| 0.019 | 53 | 66 | 25 | 22 | 33 | 12 | 13 | 18 | 7 |
+| 0.021 | 94 | 65 | 41 | 51 | 29 | 18 | 25 | 18 | 10 |
+| 0.023 | 119 | 66 | 50 | 91 | 29 | 22 | 55 | 18 | 14 |
+| 0.025 | 142 | 69 | 53 | 119 | 32 | 22 | 86 | 23 | 15 |
+| **0.027** | **165** | **66** | **55** | 136 | 32 | 23 | 109 | 25 | 16 |
+| 0.029 | 180 | 68 | 55 | 150 | 29 | 21 | 128 | 25 | 16 |
+| **jaw_gap** | | **~33.6mm** | | | **~48.1mm** | | | **~57.4mm** | |
+| **总 feasible** | | | **291** | | | **56** | | | **44** |
 
-### 33_grasp_light.py 默认参数可行性分析
+**TODO: 验证下open=30**
 
-当前默认值：
-- `cube_z = CUBE_SIZE[2]/2 = 0.015`（贴地）
-- `grasp_offset_z = -0.01`
-- `approach_z = 0.012`
-- `pre_close_target_z = cube_z + offset_z + approach_z = 0.015 + (-0.01) + 0.012 = 0.017`
+#### 关键发现
 
-所以 33 脚本的实际抓取高度对应 mapper 中 **grasp_z = 0.017**。
+1. **gripper_open 越大，jaw_gap 越宽但 jaws_level 越差**：open=25 level~66, open=40 level~32, open=50 level~22
+2. **对 30mm cube，gap 余量不是瓶颈**。open=25 时 gap=33.6mm > 30mm 已足够，再开大反而因 jaws_level 劣化导致 feasible 减少
+3. **open=25 是 cube_size=30mm 的最优 gripper 开角**：feasible=291（总），远超 open=40 (56) 和 open=50 (44)
+4. 社区参考：RoboSim SO-101 数据集用 0-100% 百分比控制夹爪（0%=闭合，100%=全开），cube half-size 1.5~2.5cm（全尺寸 3~5cm），cube X=12~24cm Y=-8~8cm
 
-查 `(0.16, 0.0)` 在各 z 层的数据：
+### 33_grasp_light.py 默认参数分析与推荐
 
-| grasp_z | pos_error_3d | pos_error_z | delta_z | reachable | jaws_level | feasible |
-|---------|-------------|-------------|---------|-----------|------------|----------|
-| 0.015 | 16.27mm | 15.15mm | 11.19mm | x | x | x |
-| **0.017** | **9.10mm** | **8.79mm** | **10.94mm** | **x** | **x** | **x** |
-| 0.019 | 6.88mm | 6.87mm | 10.49mm | x | x | x |
-| 0.021 | 5.17mm | 4.74mm | 10.19mm | x | x | x |
-| 0.023 | 3.58mm | 2.88mm | 10.28mm | **v** | x | x |
-| 0.025 | 1.82mm | 1.17mm | 10.56mm | **v** | x | x |
-| 0.027 | **0.08mm** | **0.08mm** | 10.76mm | **v** | x | x |
-| 0.029 | 0.22mm | 0.17mm | 10.72mm | **v** | x | x |
+**推荐新默认**：
+```
+cube_x=0.15, cube_y=-0.06, cube_size=0.03
+grasp_offset_z=0 
+approach_z=0.012 
+gripper_open=25
+→ pre_close_target_z = 0.015 + 0 + 0.012 = 0.027 (最优 z 层)
+```
 
-**结论**：
-1. `(0.16, 0.0)` 在 **z=0.017**（当前默认抓取高度）**不可达**（pos_error=9.1mm，阈值 5mm）
-2. 即使把 z 提高到 0.023 以上使其 reachable，**delta_z 始终 ~10mm >> 4mm 阈值**——该 XY 位置的 jaws 始终不水平
-3. `(0.16, 0.0)` 在所有 z 层都**不是 feasible 点**
+该点 pos_err=0.27mm, delta_z=-1.46mm, jaw_gap=33.7mm > 30mm — **fully feasible**。
 
-**但 (0.16, 0.0) 并非完全无望**——它的问题是 `y=0`（正前方）导致 delta_z 大。mapper 数据中 feasible 点集中在 y 偏侧的位置（如 `(0.13, -0.09)` 或 `(0.17, +0.06)`）。
 
-### 可选改进方向
 
-1. **调高抓取目标**：加大 `approach_z`（如 0.015→目标 z=0.02）或加大 `cube_size`（0.05→center_z=0.025）
-2. **偏移 cube_y**：把 cube 放到 y≠0 的位置（如 y=-0.06），让 delta_z 进入可行区
-3. **放弃 top-down**：转方案 B（angled/side grasp）
 
-结果文件：`02_intermediate/remote_results/ws_v4_zsweep_go25/workspace_summary.json`
+
+
 
 
 
@@ -107,6 +99,62 @@ scoop grasp：先把夹爪一侧伸到 cube 下方，再合拢
 **方案 C：简化轨迹规划**
 
 当前 33_grasp_light.py 的轨迹规划已经非常复杂：descent waypoints + quat gating + roll recovery + replan + pregrasp clearance。这个复杂度本身就是"在不可行空间里挣扎"的症状。如果方案 A 找到了可行 zone，轨迹应该极其简单
+
+
+
+
+
+## 基于方案A 推荐 cube 参数的实验 (03-13)
+
+
+基于新的 cub pos :  `cube_x=0.15, cube_y=-0.06, cube_size=0.03`
+
+执行 33_grasp_light.py 大概:
+
+![image](./images/light_wrist_roll_new_position/f052_approach.png)
+
+是**对角线夹取**。即如果不约束 `wrist-roll`，ik solver + quant=None，最终就会有这个不确定性。
+
+相比，调大gripper_open，接下来建议加 `wrist_roll` 约束
+
+### light wrist roll 实验
+
+**v2 思路：approach 过程中自适应触发 snap**
+
+不硬写"approach 结束后 snap"，而是在 approach 每步检查 jaw midpoint z 与 cube_top_z 的距离：
+
+```
+buffer_z = jaw_mid_z - cube_top_z
+```
+
+当 `buffer_z` 降到一个阈值时（比如 `snap_buffer = N * delta_z_per_step`，N=3~5 步的缓冲），开始执行 yaw snap：
+
+1. **触发条件**：`buffer_z < snap_trigger`（snap_trigger 由相邻 waypoint 的 z 步长 × 缓冲步数自动计算，不是硬编码常数）
+2. **snap 执行**：读取当前 closing_axis yaw → 算最近 0/90° 对齐角 → 逐步插值调整 wrist_roll（分 N 步完成，不是一步跳变）
+3. **snap 之后继续 descent**：剩余 waypoint 保持 snapped 的 wrist_roll 作为 seed
+
+这样 snap 在"距 cube 还有几步"时就开始，有足够空间完成旋转，不会在 cube 上方/上面才开始转。
+
+关键参数：
+- `snap_trigger`：自适应 = `descent_z_step * snap_buffer_steps`
+- `snap_buffer_steps`：3~5（控制提前量）
+- snap 插值步数：与 buffer_steps 相同（平滑过渡）
+
+脚本：`37_grasp_yaw_snap.py`
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
