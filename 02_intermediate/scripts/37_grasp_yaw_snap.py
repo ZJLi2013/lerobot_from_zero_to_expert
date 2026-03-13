@@ -155,7 +155,6 @@ N_CLOSE = 4
 N_LIFT_WPS = 4
 PRE_HEIGHT = 0.15
 WRIST_ROLL_IDX = 4
-SNAP_BUFFER_STEPS = 4
 
 
 # ---------------------------------------------------------------------------
@@ -314,9 +313,10 @@ def main() -> None:
     mid_local = compute_mid_local_point()
     print(f"[init] mid_local_point = [{mid_local[0]:.6f}, {mid_local[1]:.6f}, {mid_local[2]:.6f}]")
 
-    # ----- descent waypoints (position-only IK + seed chain + adaptive yaw snap) -----
+    # ----- approach waypoints (position-only IK + seed chain + yaw snap at fixed height) -----
     grasp_target_z = args.cube_z + args.grasp_offset_z + args.approach_z
     cube_top_z = args.cube_z + CUBE_SIZE[2] / 2.0
+    snap_height = cube_top_z + 1.5 * CUBE_SIZE[2]
     pre_pos = cube_init + np.array([0.0, 0.0, PRE_HEIGHT])
 
     q_pre = solve_ik(pre_pos, args.gripper_open, home_rad, local_point=mid_local)
@@ -325,13 +325,12 @@ def main() -> None:
     wrist_roll_lo = float(np.degrees(wrist_roll_range_rad[0]))
     wrist_roll_hi = float(np.degrees(wrist_roll_range_rad[1]))
 
-    descent_z_step = abs(PRE_HEIGHT - grasp_target_z) / N_DESCENT
-    snap_trigger = descent_z_step * SNAP_BUFFER_STEPS
     snap_started = False
     snap_start_wp = -1
     yaw_delta_total_deg = 0.0
     wrist_roll_before_snap = 0.0
     wrist_roll_target = 0.0
+    snap_blend_wps = 0
     yaw_snap_info = {}
 
     descent_wps = []
@@ -342,12 +341,10 @@ def main() -> None:
         pos = cube_init + np.array([0.0, 0.0, z - args.cube_z])
         wp = solve_ik(pos, args.gripper_open, seed, local_point=mid_local)
 
-        jaw_now = settle_and_measure(wp, steps=3)
-        buffer_z = jaw_now["mid"][2] - cube_top_z
-
-        if not snap_started and buffer_z < snap_trigger:
+        if not snap_started and z <= snap_height:
             snap_started = True
             snap_start_wp = i
+            jaw_now = settle_and_measure(wp, steps=3)
             closing_xy = jaw_now["closing_axis"][:2]
             yaw_current = float(np.arctan2(closing_xy[1], closing_xy[0]))
             yaw_target = round(yaw_current / (np.pi / 2)) * (np.pi / 2)
@@ -357,14 +354,13 @@ def main() -> None:
                 wrist_roll_before_snap + yaw_delta_total_deg,
                 wrist_roll_lo, wrist_roll_hi,
             ))
-            remaining_wps = N_DESCENT - i
-            print(f"[yaw_snap] triggered at wp {i}, buffer_z={buffer_z*1000:.1f}mm, "
+            snap_blend_wps = N_DESCENT - i
+            print(f"[yaw_snap] triggered at wp {i}, z={z:.4f}, snap_height={snap_height:.4f}, "
                   f"yaw={np.degrees(yaw_current):.1f}° → {np.degrees(yaw_target):.1f}°, "
-                  f"delta={yaw_delta_total_deg:.1f}°, {remaining_wps} steps to blend")
+                  f"delta={yaw_delta_total_deg:.1f}°, {snap_blend_wps} steps to blend")
 
         if snap_started:
-            remaining_wps = N_DESCENT - snap_start_wp
-            progress = (i - snap_start_wp + 1) / remaining_wps
+            progress = (i - snap_start_wp + 1) / snap_blend_wps
             blended_roll = wrist_roll_before_snap + progress * (wrist_roll_target - wrist_roll_before_snap)
             wp[WRIST_ROLL_IDX] = float(np.clip(blended_roll, wrist_roll_lo, wrist_roll_hi))
             descent_phases.append("approach_snap")
@@ -382,8 +378,8 @@ def main() -> None:
     yaw_snap_info = {
         "triggered": snap_started,
         "trigger_wp": snap_start_wp,
-        "snap_buffer_steps": SNAP_BUFFER_STEPS,
-        "snap_trigger_m": snap_trigger,
+        "snap_height": snap_height,
+        "snap_blend_wps": snap_blend_wps,
         "yaw_delta_deg": yaw_delta_total_deg,
         "yaw_after_deg": yaw_after,
         "jaw_gap_after": jaw_final_approach["jaw_gap"],
